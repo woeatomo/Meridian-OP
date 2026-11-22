@@ -25,10 +25,12 @@ export async function maybeReshape(p, { hasExitSignal = false, executeTool, now 
 
   const decision = decideReshape(reshapeInputFromPosition(p, tracked, cfg, { hasExitSignal, now }), cfg);
   const wants = decision.action === "RESHAPE";
-  if (lastReason.get(p.position) !== decision.reason && (wants || (decision.binsDown ?? 0) >= (cfg.reshapeBins ?? 5))) {
+  // Log on a change of KIND of reason, not every time a number in it moves (fees tick up every poll).
+  const reasonKind = `${decision.action}:${decision.reason.replace(/[-+$]?\d[\d.,]*%?/g, "#")}`;
+  if (lastReason.get(p.position) !== reasonKind && (wants || (decision.binsDown ?? 0) >= (cfg.reshapeBins ?? 5))) {
     log("reshape", `${p.pair ?? p.position.slice(0, 8)}: ${decision.action} — ${decision.reason}`);
   }
-  lastReason.set(p.position, decision.reason);
+  lastReason.set(p.position, reasonKind);
   if (!confirmReshape(p.position, wants, cfg, now)) return null;
 
   inflight.add(p.position);

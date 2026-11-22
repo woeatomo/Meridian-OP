@@ -52,7 +52,27 @@ const indexPath = fileURLToPath(import.meta.url);
 const isMain = !config.standalone.enabled && (process.env.pm_id != null
   || (entrypointPath ? path.resolve(entrypointPath) === indexPath : false));
 
+// Meridian-OP: the legacy daemon can be started two ways — this module self-starts when it
+// is the PM2/CLI entry (isMain), and index.js calls startLegacy(). Under PM2 both happened,
+// doubling the Telegram poller, HiveMind sync and SIGINT handlers. These flags make startup
+// idempotent, and initOpRuntime() (wallet check, RPC failover, dump history) always runs
+// BEFORE any cron/screening can deploy.
+let _opRuntimeReady = false;
+let _legacyStarted = false;
+function initOpRuntime() {
+  if (_opRuntimeReady) return;
+  const walletCheck = checkWalletConsistency({ walletAddress: config.standalone.walletAddress, privateKey: process.env.WALLET_PRIVATE_KEY, dryRun: process.env.DRY_RUN === "true" });
+  if (!walletCheck.ok) throw new Error(walletCheck.message);
+  if (walletCheck.level === "warn") log("startup_warn", walletCheck.message);
+  startRpcHealthMonitor({ notify: portfolioNotify });
+  const restored = enableHistoryPersistence(repoPath("dump-history.json"));
+  if (restored) log("startup", `Dump detector: restored ${restored} price ticks from before restart`);
+  _opRuntimeReady = true;
+}
+
 if (isMain) {
+  initOpRuntime();
+  _legacyStarted = true;
   log("startup", "DLMM LP Agent starting...");
   log("startup", `Repo: ${REPO_ROOT} | cwd: ${process.cwd()}${process.env.pm_id ? ` | PM2 id: ${process.env.pm_id}` : ""}`);
   if (path.resolve(process.cwd()) !== path.resolve(REPO_ROOT)) {
@@ -2080,13 +2100,10 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
 }
 
 export function startLegacy() {
-  const walletCheck = checkWalletConsistency({ walletAddress: config.standalone.walletAddress, privateKey: process.env.WALLET_PRIVATE_KEY, dryRun: process.env.DRY_RUN === "true" });
-  if (!walletCheck.ok) throw new Error(walletCheck.message);
-  if (walletCheck.level === "warn") log("startup_warn", walletCheck.message);
+  initOpRuntime();
+  if (_legacyStarted) return; // already self-started as the PM2/CLI entry (isMain)
+  _legacyStarted = true;
   ensureAgentId();
-  startRpcHealthMonitor({ notify: portfolioNotify });
-  const restored = enableHistoryPersistence(repoPath("dump-history.json"));
-  if (restored) log("startup", `Dump detector: restored ${restored} price ticks from before restart`);
   bootstrapHiveMind().catch(e => log("hivemind_warn", e.message));
   startHiveMindBackgroundSync();
   startCronJobs();
