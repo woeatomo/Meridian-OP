@@ -21,6 +21,7 @@
     "test:agent": "DRY_RUN=true node test/test-agent.js",
     "init:op": "node scripts/init-op.js",
     "test:op": "node test/test-op.js && node test/test-standalone.js",
+    "init:config": "node scripts/init-config.js",
     "postinstall": "node scripts/patch-anchor.js"
   },
   "knip": {

@@ -166,45 +166,31 @@ cp rpc-endpoints.example.json rpc-endpoints.json && chmod 600 rpc-endpoints.json
 Opsional, hanya kalau perlu RPC terpisah: `MONITOR_RPC_URL` + `MONITOR_WS_URL` (monitor wallet
 memakai endpoint ini dan TIDAK ikut failover), `BALANCE_RPC_URL`, `PNL_RPC_URL`.
 
-## Deploy di VPS
+## Deploy di VPS (instalasi baru)
+
+Butuh Node.js 22+, git, dan PM2 (`npm i -g pm2`).
 
 ```bash
-cd ~/Meridian-OP
-git fetch origin op-v2
-git checkout op-v2
-git pull origin op-v2
-npm install
-npm run test:op
-```
-
-Gabungkan key baru dari `user-config.p0-p1.json` ke `user-config.json` secara manual
-(`reshapeEnabled`, `dump*`, `reshape*`, `swapMaxChunks`, `relayCloseSlippageBps`, …).
-Jalankan dulu dalam shadow / DRY_RUN (`shadowMode: true` atau `npm run dev`), cek log
-`[DUMP_WARN]`, `[RESHAPE]`, `[EXECUTOR_WARN]`, lalu restart PM2:
-
-```bash
-npm run pm2:restart
-```
-
-Portfolio guard: status dan reset baseline. **Setelah deposit / withdraw manual ke wallet bot,
-selalu reset** — kalau tidak, transfer itu terbaca sebagai profit / rugi:
-
-```bash
-node cli.js guard
+git clone -b op-v2 https://github.com/woeatomo/Meridian-OP.git ~/Meridian-OP
 ```
 
 ```bash
-node cli.js guard --reset
+cd ~/Meridian-OP && npm install && npm run test:op
 ```
 
-(`--reset --clear-kill` juga mencabut kill switch yang sedang aktif. Mode legacy punya `/guard`,
-`/guard reset`, `/guard reset kill` di Telegram.)
+1. `.env` — minimal `WALLET_PRIVATE_KEY`, `OPENROUTER_API_KEY` (atau `LLM_API_KEY`), opsional
+   `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`. **Tanpa** `RPC_URL` / `HELIUS_API_KEY`. `chmod 600 .env`.
+2. `cp rpc-endpoints.example.json rpc-endpoints.json && chmod 600 rpc-endpoints.json`, isi `apiKey`.
+3. `npm run init:config` — membuat `user-config.json` (template + Meridian-OP, shadowMode on, tanpa key RPC).
+4. Smart wallet yang dipantau (minimal `walletThreshold`, default 2):
+   `node cli.js wallets add --address <ALAMAT> --name <NAMA>`
+5. Cek: `node cli.js rpc`, `node cli.js wallets`, `node cli.js guard`.
+6. Jalankan shadow dulu: `npm run pm2:start`, pantau `npm run pm2:logs`.
+7. Live: ubah `shadowMode` ke `false` di `user-config.json`, `npm run pm2:restart`, lalu
+   `node cli.js guard --reset`.
 
-Uji manual satu posisi (respek `reshapeEnabled`; di DRY_RUN hanya menampilkan rencana):
-
-```bash
-node cli.js reshape --position <alamat_posisi>
-```
+Update berikutnya: `git pull origin op-v2 && npm install && npm run init:config && npm run pm2:restart`
+(`init:config` hanya menambah key baru, setelanmu tidak ditimpa).
 
 ---
 

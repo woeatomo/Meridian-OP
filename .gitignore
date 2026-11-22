@@ -55,3 +55,4 @@ standalone.lock
 dump-history.json
 dump-history.json.tmp
 rpc-endpoints.json
+user-config.json.bak
