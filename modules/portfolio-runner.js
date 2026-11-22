@@ -16,13 +16,62 @@
 
 import { config } from "../config.js";
 import { log } from "../logger.js";
-import { getPortfolioState, savePortfolioState } from "../state.js";
+import { getPortfolioState, savePortfolioState, getTrackedPositions } from "../state.js";
 import { portfolioGuard } from "./portfolio-guard.js";
 import { isRpcSafeMode } from "./rpc-health.js";
 
 const STALE_MS = 15 * 60_000;
 let lastEvalAt = 0;
 let evaluating = null;
+let lastWalletActivityAt = 0;
+let lastKillLogAt = 0;
+const streaks = { kill: { count: 0, since: 0 }, daily: { count: 0, since: 0 } };
+
+/** "off" | "log" | "enforce" (default "log": never closes or pauses, only logs a would-trip). */
+export function killSwitchMode() {
+  const m = String(config.management.killSwitchMode ?? "log").toLowerCase();
+  return ["off", "log", "enforce"].includes(m) ? m : "log";
+}
+
+/** Called by the executor after every wallet-mutating tool (deploy/close/claim/swap/reshape). */
+export function markWalletActivity(now = Date.now()) { lastWalletActivityAt = now; }
+
+/** Consecutive-check confirmation. Returns true once `checks` hits AND `minutes` elapsed. */
+function confirmStreak(key, active, now, checks = 1, minutes = 0) {
+  const s = streaks[key];
+  if (!active) { s.count = 0; s.since = 0; return false; }
+  if (s.count === 0) s.since = now;
+  s.count++;
+  return s.count >= Math.max(1, Number(checks)) && now - s.since >= Math.max(0, Number(minutes)) * 60_000;
+}
+
+/**
+ * Pure. Compare the live (Meteora-indexed) position list with the bot's own tracking.
+ * - notIndexed: tracked open, missing from the live list, opened/reshaped within
+ *   `portfolioIndexGraceMin` -> its SOL left the wallet but it isn't counted yet.
+ * - stale: still listed live but already closed in tracking (funds back in the wallet).
+ * Returns { positions (live minus stale), notIndexed, stale }.
+ */
+export function reconcileWithTracked(livePositions, tracked, now = Date.now(), cfg = {}) {
+  const live = Array.isArray(livePositions) ? livePositions : [];
+  const all = Array.isArray(tracked) ? tracked : [];
+  const liveSet = new Set(live.map((p) => p.position));
+  const closedSet = new Set(all.filter((t) => t.closed).map((t) => t.position));
+  const graceMs = Math.max(0, Number(cfg.portfolioIndexGraceMin ?? 10)) * 60_000;
+  const notIndexed = all.filter((t) => {
+    if (t.closed || liveSet.has(t.position)) return false;
+    const opened = new Date(t.lineage?.last_reshape_at || t.deployed_at || 0).getTime();
+    return Number.isFinite(opened) && now - opened <= graceMs;
+  }).map((t) => t.position);
+  const stale = live.filter((p) => closedSet.has(p.position)).map((p) => p.position);
+  return { positions: live.filter((p) => !closedSet.has(p.position)), notIndexed, stale };
+}
+
+/** Test helper. */
+export function _resetPortfolioRunner() {
+  lastEvalAt = 0; lastWalletActivityAt = 0; lastKillLogAt = 0; evaluating = null;
+  for (const s of Object.values(streaks)) { s.count = 0; s.since = 0; }
+}
 
 /** Tanggal "hari trading" untuk offset jam tertentu. Pure. */
 export function tradingDay(now = Date.now(), offsetHours = 7) {
@@ -63,7 +112,7 @@ export function getDeployBlock(now = Date.now()) {
   if (isRpcSafeMode()) return "RPC safe mode — all RPC endpoints down";
   if (cfg.portfolioGuardEnabled === false) return null;
   const st = getPortfolioState();
-  if (st.kill_switch_until && now < new Date(st.kill_switch_until).getTime()) {
+  if (killSwitchMode() === "enforce" && st.kill_switch_until && now < new Date(st.kill_switch_until).getTime()) {
     return `Kill switch active until ${st.kill_switch_until} (${st.kill_switch_reason || "drawdown"})`;
   }
   if (st.day_blocked && st.day === tradingDay(now, cfg.portfolioDayUtcOffsetHours ?? 7)) {
@@ -110,8 +159,22 @@ export async function evaluatePortfolio({ positions, getWalletBalances, executeT
   lastEvalAt = now;
   evaluating = (async () => {
     const unit = cfg.portfolioGuardUnit === "usd" ? "usd" : "sol";
+    const killMode = killSwitchMode();
+    // Right after a deploy/close/reshape the wallet balance and the Meteora position list are
+    // briefly out of sync (SOL already left the wallet, the position isn't indexed yet).
+    // Don't measure equity at all during that window.
+    const settleMs = Math.max(0, Number(cfg.portfolioSettleSec ?? 120)) * 1000;
+    if (now - lastWalletActivityAt < settleMs) {
+      return { allowDeploy: !getDeployBlock(now), killSwitch: false, settling: true, reason: "settling after a transaction — equity check skipped" };
+    }
+    const rec = reconcileWithTracked(positions, getTrackedPositions(false), now, cfg);
+    if (rec.notIndexed.length) {
+      log("portfolio", `Equity check skipped: ${rec.notIndexed.length} tracked position(s) not indexed by Meteora yet`);
+      return { allowDeploy: !getDeployBlock(now), killSwitch: false, settling: true, reason: "position(s) not indexed yet — equity check skipped" };
+    }
+    if (rec.stale.length) log("portfolio", `Ignoring ${rec.stale.length} already-closed position(s) still listed by Meteora`);
     const balances = await getWalletBalances({ force: true }).catch((e) => ({ error: e.message }));
-    const eq = computeEquity(balances, positions, unit);
+    const eq = computeEquity(balances, rec.positions, unit);
     let st = getPortfolioState();
     const day = tradingDay(now, cfg.portfolioDayUtcOffsetHours ?? 7);
 
@@ -144,17 +207,44 @@ export async function evaluatePortfolio({ positions, getWalletBalances, executeT
     }
     st = savePortfolioState(patch);
 
-    const decision = portfolioGuard({
+    const guardInput = {
       dayStartEquity: st.day_start_equity,
       equity: eq.equity,
       peakEquity: st.peak_equity,
-      killSwitchUntil: st.kill_switch_until ? new Date(st.kill_switch_until).getTime() : null,
+      killSwitchUntil: killMode === "enforce" && st.kill_switch_until ? new Date(st.kill_switch_until).getTime() : null,
       now,
-    }, cfg);
+    };
+    let decision = portfolioGuard(guardInput, cfg);
+
+    // Kill switch: must hold for N consecutive checks spanning >= M minutes (a single bad read
+    // never closes everything). Outside "enforce" it only logs what it would have done.
+    if (decision.killSwitch) {
+      const confirmed = confirmStreak("kill", true, now, cfg.killSwitchConfirmChecks ?? 3, cfg.killSwitchConfirmMinutes ?? 3);
+      if (killMode !== "enforce") {
+        if (confirmed && killMode === "log" && now - lastKillLogAt > 3600_000) {
+          lastKillLogAt = now;
+          log("portfolio_warn", `KILL SWITCH WOULD TRIP (log-only, killSwitchMode=${killMode}): ${decision.reason} — no positions closed, entries not paused`);
+        }
+        decision = portfolioGuard({ ...guardInput, peakEquity: null }, cfg); // daily-loss rule only
+      } else if (!confirmed) {
+        decision = { ...decision, killSwitch: false, reason: `${decision.reason} (confirming ${streaks.kill.count}/${cfg.killSwitchConfirmChecks ?? 3})` };
+      }
+    } else {
+      confirmStreak("kill", false, now);
+    }
+
+    // Daily loss: also confirmed over consecutive checks before blocking the day.
+    if (decision.tripped === "daily_loss" && !st.day_blocked) {
+      if (!confirmStreak("daily", true, now, cfg.dailyLossConfirmChecks ?? 2, 0)) {
+        decision = { ...decision, reason: `${decision.reason} (confirming ${streaks.daily.count}/${cfg.dailyLossConfirmChecks ?? 2})` };
+      }
+    } else if (decision.tripped !== "daily_loss") {
+      confirmStreak("daily", false, now);
+    }
     decision.equity = eq.equity;
     decision.unit = eq.unit;
 
-    if (decision.tripped === "daily_loss" && !st.day_blocked) {
+    if (decision.tripped === "daily_loss" && !st.day_blocked && streaks.daily.count >= (cfg.dailyLossConfirmChecks ?? 2)) {
       savePortfolioState({ day_blocked: true, day_blocked_reason: decision.reason });
       log("portfolio_warn", `DAILY LOSS LIMIT: ${decision.reason}`);
       notify?.("DAILY_LOSS_LIMIT", `${decision.reason}\nEquity ${eq.equity.toFixed(4)} ${eq.unit.toUpperCase()} (start ${st.day_start_equity.toFixed(4)}). Existing positions keep being managed.`);
@@ -168,8 +258,9 @@ export async function evaluatePortfolio({ positions, getWalletBalances, executeT
       notify?.("KILL_SWITCH", `${decision.reason}\nEquity ${eq.equity.toFixed(4)} ${eq.unit.toUpperCase()} (peak ${st.peak_equity.toFixed(4)}). Closing ${positions?.length ?? 0} position(s); entries paused until ${until}.`);
     }
 
-    // Close-all runs for a fresh trip AND for a trip recorded earlier without an executor.
-    if (getPortfolioState().kill_switch_pending_close && typeof executeTool === "function") {
+    // Close-all runs for a fresh trip AND for a trip recorded earlier without an executor —
+    // only while the kill switch is enforced (a trip recorded before switching to log/off is ignored).
+    if (killMode === "enforce" && getPortfolioState().kill_switch_pending_close && typeof executeTool === "function") {
       decision.closed = await closeAll(positions, executeTool);
       if (decision.closed.every((c) => c.ok)) savePortfolioState({ kill_switch_pending_close: false });
     }
@@ -200,7 +291,7 @@ export function formatGuardStatus(now = Date.now()) {
   const dd = st.peak_equity > 0 && st.last_equity > 0 ? ((st.last_equity - st.peak_equity) / st.peak_equity) * 100 : null;
   const block = getDeployBlock(now);
   return [
-    `Portfolio guard: ${cfg.portfolioGuardEnabled === false ? "DISABLED" : "on"} (${u})`,
+    `Portfolio guard: ${cfg.portfolioGuardEnabled === false ? "DISABLED" : "on"} (${u}) | kill switch: ${killSwitchMode()}`,
     `Equity: ${f(st.last_equity)} ${u} | day start ${f(st.day_start_equity)} (${st.day || "?"}) | peak ${f(st.peak_equity)}`,
     `Day PnL: ${dayPnl == null ? "?" : dayPnl.toFixed(2)}% (limit ${cfg.dailyLossLimitPct}%) | Drawdown: ${dd == null ? "?" : dd.toFixed(2)}% (kill ${cfg.portfolioKillSwitchPct}%)`,
     `Deploys: ${block ? `BLOCKED — ${block}` : "allowed"}`,

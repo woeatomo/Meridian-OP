@@ -161,6 +161,19 @@ console.log("\n[6] portfolio guard (daily loss + kill switch)");
   check("missing position value → error (no false loss)", !!computeEquity(bal, [{ position: "p" }], "sol").error);
   check("missing SOL price → error", !!computeEquity({ sol: 1, tokens: [] }, [], "sol").error);
   check("trading day uses WIB offset", tradingDay(Date.UTC(2026, 10, 22, 18, 0), 7) === "2026-11-23" && tradingDay(Date.UTC(2026, 10, 22, 16, 0), 7) === "2026-11-22");
+
+  const { reconcileWithTracked, killSwitchMode } = await import("../modules/portfolio-runner.js");
+  const now = T0;
+  const tracked = [
+    { position: "New", closed: false, deployed_at: new Date(now - 60_000).toISOString() },        // just opened
+    { position: "Old", closed: false, deployed_at: new Date(now - 3600_000).toISOString() },      // gone > grace: not "in flight"
+    { position: "Shut", closed: true, deployed_at: new Date(now - 7200_000).toISOString() },      // closed, API still lists it
+    { position: "Live", closed: false, deployed_at: new Date(now - 7200_000).toISOString() },
+  ];
+  const r = reconcileWithTracked([{ position: "Live" }, { position: "Shut" }], tracked, now, cfg);
+  check("just-opened position missing from Meteora → notIndexed (not a loss)", r.notIndexed.join() === "New");
+  check("closed position still listed → excluded (no double count)", r.stale.join() === "Shut" && r.positions.map((p) => p.position).join() === "Live");
+  check("kill switch defaults to log-only", killSwitchMode() === "log");
 }
 
 console.log("\n[7] regime gate (acute rules, fail-open)");

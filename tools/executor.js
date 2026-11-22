@@ -45,7 +45,7 @@ const TIMEFRAME_MINUTES = {
 };
 import { log, logAction } from "../logger.js";
 import { notifyDeploy, notifyClose, notifySwap, notifyReshape, notifyAlert, notifyPartialTp } from "../telegram.js";
-import { evaluatePortfolio, getDeployBlock, isPortfolioStateStale } from "../modules/portfolio-runner.js";
+import { evaluatePortfolio, getDeployBlock, isPortfolioStateStale, markWalletActivity } from "../modules/portfolio-runner.js";
 import { regimeDeployGate } from "../modules/regime-runner.js";
 import { isRpcSafeMode } from "../modules/rpc-health.js";
 
@@ -461,6 +461,12 @@ const toolMap = {
       portfolioDayUtcOffsetHours: ["management", "portfolioDayUtcOffsetHours"],
       portfolioGuardCheckSec: ["management", "portfolioGuardCheckSec"],
       killSwitchPauseHours: ["management", "killSwitchPauseHours"],
+      killSwitchMode: ["management", "killSwitchMode"],
+      killSwitchConfirmChecks: ["management", "killSwitchConfirmChecks"],
+      killSwitchConfirmMinutes: ["management", "killSwitchConfirmMinutes"],
+      dailyLossConfirmChecks: ["management", "dailyLossConfirmChecks"],
+      portfolioSettleSec: ["management", "portfolioSettleSec"],
+      portfolioIndexGraceMin: ["management", "portfolioIndexGraceMin"],
       partialTpEnabled: ["management", "partialTpEnabled"],
       partialTp1Pct: ["management", "partialTp1Pct"],
       partialTp1Fraction: ["management", "partialTp1Fraction"],
@@ -802,7 +808,7 @@ export async function sweepPendingSwaps({ openBaseMints = [] } = {}) {
 export async function executeTool(name, args = {}) {
   if (WRITE_TOOLS.has(name)) return withWalletLock(async () => {
     try { return await executeToolUnlocked(name, args); }
-    finally { invalidateBalances(); }
+    finally { invalidateBalances(); markWalletActivity(); }
   }, name === "close_position" ? 10 : name === "partial_close_position" ? 8 : name === "reshape_position" ? 6 : name === "deploy_position" ? 0 : 5);
   return executeToolUnlocked(name, args);
 }

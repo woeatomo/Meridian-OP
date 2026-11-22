@@ -197,6 +197,12 @@ export const config = {
     portfolioDayUtcOffsetHours: u.portfolioDayUtcOffsetHours ?? 7, // hari trading = WIB
     portfolioGuardCheckSec: u.portfolioGuardCheckSec ?? 60,     // evaluasi dari poller maks tiap N detik
     killSwitchPauseHours:   u.killSwitchPauseHours   ?? 24,
+    killSwitchMode:         u.killSwitchMode         ?? "log", // "off" | "log" (only logs a would-trip) | "enforce" (closes all + pauses)
+    killSwitchConfirmChecks: u.killSwitchConfirmChecks ?? 3,  // drawdown must hold N consecutive checks ...
+    killSwitchConfirmMinutes: u.killSwitchConfirmMinutes ?? 3, // ... spanning at least M minutes
+    dailyLossConfirmChecks: u.dailyLossConfirmChecks ?? 2,
+    portfolioSettleSec:     u.portfolioSettleSec     ?? 120,   // skip equity checks right after a transaction
+    portfolioIndexGraceMin: u.portfolioIndexGraceMin ?? 10,    // new position not yet listed by Meteora -> skip, not a loss
     // Meridian-OP: Partial TP (modules/partial-tp.js). Saat aktif, TP penuh pindah ke partialTpFinalPct.
     partialTpEnabled:       u.partialTpEnabled       ?? false,
     partialTp1Pct:          u.partialTp1Pct          ?? 5,
