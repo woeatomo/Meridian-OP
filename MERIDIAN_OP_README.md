@@ -185,6 +185,8 @@ cd ~/Meridian-OP && npm install && npm run test:op
    nilai contoh/placeholder di sana akan mengalahkan `rpc-endpoints.json`.
 2. `cp rpc-endpoints.example.json rpc-endpoints.json && chmod 600 rpc-endpoints.json`, isi `apiKey`.
 3. `npm run init:config` — membuat `user-config.json` (template + Meridian-OP, shadowMode on, tanpa key RPC).
+   Biarkan `walletAddress` **kosong** — alamat diambil dari `WALLET_PRIVATE_KEY`. Kalau diisi, harus
+   alamat wallet bot yang sama; kalau beda, bot menolak start di mode live (peringatan saja di shadow).
 4. Smart wallet yang dipantau (minimal `walletThreshold`, default 2):
    `node cli.js wallets add --address <ALAMAT> --name <NAMA>`
 5. Cek: `node cli.js rpc`, `node cli.js wallets`, `node cli.js guard`.

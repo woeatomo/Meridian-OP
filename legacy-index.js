@@ -18,6 +18,7 @@ import { maybeReshape } from "./modules/reshape-runner.js";
 import { partialTpSignal, markPartialAttempt } from "./modules/partial-tp-runner.js";
 import { enableHistoryPersistence, flushHistory } from "./modules/dump-detector.js";
 import { startRpcHealthMonitor, formatRpcStatus } from "./modules/rpc-health.js";
+import { checkWalletConsistency } from "./modules/wallet-check.js";
 import {
   startPolling,
   stopPolling,
@@ -2079,6 +2080,9 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
 }
 
 export function startLegacy() {
+  const walletCheck = checkWalletConsistency({ walletAddress: config.standalone.walletAddress, privateKey: process.env.WALLET_PRIVATE_KEY, dryRun: process.env.DRY_RUN === "true" });
+  if (!walletCheck.ok) throw new Error(walletCheck.message);
+  if (walletCheck.level === "warn") log("startup_warn", walletCheck.message);
   ensureAgentId();
   startRpcHealthMonitor({ notify: portfolioNotify });
   const restored = enableHistoryPersistence(repoPath("dump-history.json"));

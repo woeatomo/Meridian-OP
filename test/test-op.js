@@ -356,5 +356,23 @@ console.log("\n[11] dump detector history survives restart");
   try { fs.unlinkSync(file); } catch {}
 }
 
+console.log("\n[12] walletAddress vs WALLET_PRIVATE_KEY");
+{
+  const { checkWalletConsistency, publicKeyFromSecret } = await import("../modules/wallet-check.js");
+  const { Keypair } = await import("@solana/web3.js");
+  const bs58 = (await import("bs58")).default;
+  const kp = Keypair.generate(), other = Keypair.generate();
+  const secret = bs58.encode(kp.secretKey);
+  const me = kp.publicKey.toString();
+  check("derives pubkey from base58 + JSON array secrets", publicKeyFromSecret(secret) === me && publicKeyFromSecret(JSON.stringify([...kp.secretKey])) === me);
+  check("empty walletAddress → ok", checkWalletConsistency({ walletAddress: "", privateKey: secret, dryRun: false }).ok);
+  check("matching address → ok", checkWalletConsistency({ walletAddress: me, privateKey: secret, dryRun: false }).level === "ok");
+  const bad = checkWalletConsistency({ walletAddress: other.publicKey.toString(), privateKey: secret, dryRun: false });
+  check("mismatch in LIVE → refuse to start", !bad.ok && bad.level === "error" && !bad.message.includes(secret));
+  check("mismatch in DRY_RUN → warning only", checkWalletConsistency({ walletAddress: other.publicKey.toString(), privateKey: secret, dryRun: true }).level === "warn");
+  check("read-only shadow (no key) → warning", checkWalletConsistency({ walletAddress: me, privateKey: "", dryRun: true }).level === "warn");
+  check("LIVE without key → refuse", !checkWalletConsistency({ walletAddress: me, privateKey: "", dryRun: false }).ok);
+}
+
 console.log(failed === 0 ? "\nALL TESTS PASSED" : `\n${failed} TEST(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

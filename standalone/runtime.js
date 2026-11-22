@@ -23,6 +23,7 @@ import { maybeReshape } from "../modules/reshape-runner.js";
 import { partialTpSignal, markPartialAttempt } from "../modules/partial-tp-runner.js";
 import { enableHistoryPersistence, flushHistory } from "../modules/dump-detector.js";
 import { startRpcHealthMonitor } from "../modules/rpc-health.js";
+import { checkWalletConsistency } from "../modules/wallet-check.js";
 import { getWalletBalances } from "../tools/wallet.js";
 import { getTrackedPositions, confirmPeak, updatePnlAndCheckExits, registerExitSignal, syncOpenPositions, setTriggerWallets } from "../state.js";
 import { recordPositionSnapshot } from "../pool-memory.js";
@@ -399,6 +400,9 @@ async function shutdown(signalName) {
 
 export async function startStandalone() {
   if (!config.standalone.monitorRpcUrl) throw new Error("Standalone needs an RPC: add endpoints to rpc-endpoints.json (or set RPC_URL / MONITOR_RPC_URL)");
+  const walletCheck = checkWalletConsistency({ walletAddress: config.standalone.walletAddress, privateKey: process.env.WALLET_PRIVATE_KEY, dryRun: process.env.DRY_RUN === "true" });
+  if (!walletCheck.ok) throw new Error(walletCheck.message);
+  if (walletCheck.level === "warn") log("runtime_warn", walletCheck.message);
   acquireLock();
   startRpcHealthMonitor({ notify: portfolioNotify });
   const restored = enableHistoryPersistence(repoPath("dump-history.json"));
