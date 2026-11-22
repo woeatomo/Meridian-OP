@@ -143,6 +143,29 @@ function isSystemRoleError(error) {
   return /invalid message role:\s*system/i.test(message);
 }
 
+const IS_OPENROUTER = /openrouter\.ai/i.test(process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1");
+
+/**
+ * OpenRouter provider routing (Meridian-OP). Default = open routing restricted to providers
+ * that support every parameter we send (tools, tool_choice, reasoning). `llmProviderOrder`
+ * (user-config) puts preferred providers first; `llmAllowFallbacks: false` pins strictly to them.
+ * `relaxed` (after a "No endpoints found" 404) drops order + pin but keeps require_parameters.
+ */
+function openRouterProviderRouting(relaxed = false) {
+  const order = Array.isArray(config.llm.llmProviderOrder) ? config.llm.llmProviderOrder.filter(Boolean) : [];
+  const routing = { require_parameters: true };
+  if (!relaxed && order.length) {
+    routing.order = order;
+    routing.allow_fallbacks = config.llm.llmAllowFallbacks !== false;
+  }
+  return routing;
+}
+
+function isNoEndpointsError(error) {
+  const message = String(error?.message || error?.error?.message || error || "");
+  return (error?.status === 404 || /\b404\b/.test(message)) && /no endpoints found/i.test(message);
+}
+
 function isToolChoiceRequiredError(error) {
   const message = String(error?.message || error?.error?.message || error || "");
   return /tool_choice/i.test(message) && /required/i.test(message);
@@ -194,6 +217,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   let omitToolChoice = false;
 
   let emptyStreak = 0;
+  let relaxRouting = false; // set after OpenRouter finds no endpoint for the provider pin
   for (let step = 0; step < maxSteps; step++) {
     log("agent", `Step ${step + 1}/${maxSteps}`);
 
@@ -217,10 +241,13 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             tools: getToolsForRole(agentType, goal),
             temperature: config.llm.temperature,
             max_tokens: maxOutputTokens ?? config.llm.maxTokens,
-            // Meridian-OP: reasoning effort per peran + provider routing ke DeepSeek.
-            reasoning: { effort: REASONING_EFFORT_BY_ROLE[agentType] ?? "low" },
-            provider: { order: config.llm.llmProviderOrder ?? ["deepseek"], allow_fallbacks: false },
           };
+          // Meridian-OP: OpenRouter-only extras (other OpenAI-compatible servers may reject them).
+          if (IS_OPENROUTER) {
+            reqParams.reasoning = { effort: REASONING_EFFORT_BY_ROLE[agentType] ?? "low" };
+            const routing = openRouterProviderRouting(relaxRouting);
+            if (routing) reqParams.provider = routing;
+          }
           if (!omitToolChoice) reqParams.tool_choice = toolChoice;
           response = await client.chat.completions.create(reqParams);
         } catch (error) {
@@ -228,6 +255,14 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             providerMode = "user_embedded";
             messages = buildMessages(systemPrompt, sessionHistory, goal, providerMode);
             log("agent", "Provider rejected system role — retrying with embedded system instructions");
+            attempt -= 1;
+            continue;
+          }
+          if (IS_OPENROUTER && !relaxRouting && isNoEndpointsError(error)) {
+            // A pinned provider that can't serve this request (e.g. no tool support) leaves
+            // OpenRouter with zero endpoints. Drop the pin for the rest of this run.
+            relaxRouting = true;
+            log("agent_warn", "OpenRouter: no endpoint matched the provider pin — retrying with open routing (tool-capable providers only)");
             attempt -= 1;
             continue;
           }

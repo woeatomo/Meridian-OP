@@ -272,7 +272,10 @@ export const config = {
     reasoningEffortManager:  u.reasoningEffortManager  ?? "low",
     reasoningEffortGeneral:  u.reasoningEffortGeneral  ?? "low",
     // Pin provider ke DeepSeek langsung, jangan dilempar ke provider pihak ketiga.
-    llmProviderOrder: u.llmProviderOrder ?? ["deepseek"],
+    // OpenRouter routing: [] = let OpenRouter pick any tool-capable provider (recommended).
+    // Set e.g. ["deepseek"] to prefer a provider; llmAllowFallbacks:false pins strictly to it.
+    llmProviderOrder: u.llmProviderOrder ?? [],
+    llmAllowFallbacks: u.llmAllowFallbacks ?? true,
   },
 
   // ─── Darwinian Signal Weighting ───────
