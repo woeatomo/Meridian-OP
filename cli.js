@@ -596,6 +596,31 @@ switch (subcommand) {
     break;
   }
 
+  // ── exits (Meridian-OP): recent closes with their exit reason ───
+  case "exits": {
+    const limit = flags.limit ? parseInt(flags.limit) : 20;
+    let perf = [];
+    try { perf = JSON.parse(fs.readFileSync(path.join(process.cwd(), "lessons.json"), "utf8")).performance || []; } catch { /* none yet */ }
+    const rows = perf.slice(-limit).reverse();
+    if (!rows.length) { console.log("No closed positions recorded yet (DRY_RUN closes are not recorded)."); break; }
+    const pad = (v, n) => String(v ?? "").slice(0, n).padEnd(n);
+    console.log(`${pad("closed (UTC)", 17)} ${pad("pair", 14)} ${pad("PnL %", 8)} ${pad("PnL $", 9)} ${pad("held", 7)} reason`);
+    for (const r of rows) {
+      const held = r.minutes_held != null ? `${Math.round(r.minutes_held)}m` : "?";
+      const extra = r.reshape_count ? ` (after ${r.reshape_count} reshape)` : "";
+      console.log(`${pad(String(r.recorded_at || "").replace("T", " ").slice(0, 16), 17)} ${pad(r.pool_name || String(r.pool || "").slice(0, 8), 14)} ${pad(r.pnl_pct, 8)} ${pad(r.pnl_usd, 9)} ${pad(held, 7)} ${r.close_reason || "?"}${extra}`);
+    }
+    const byReason = {};
+    for (const r of perf) {
+      const key = String(r.close_reason || "?").replace(/\(.*$/, "").replace(/[-+]?\d[\d.,]*%?/g, "#").trim().slice(0, 40);
+      (byReason[key] ||= { n: 0, pnl: 0 }).n++;
+      byReason[key].pnl += Number(r.pnl_usd) || 0;
+    }
+    console.log("\nBy reason (all time):");
+    for (const [k, v] of Object.entries(byReason).sort((a, b) => b[1].n - a[1].n)) console.log(`  ${pad(v.n + "x", 5)} ${pad("$" + v.pnl.toFixed(2), 10)} ${k}`);
+    break;
+  }
+
   // ── performance ──────────────────────────────────────────────────
   case "performance": {
     const { getPerformanceHistory, getPerformanceSummary } = await import("./lessons.js");
