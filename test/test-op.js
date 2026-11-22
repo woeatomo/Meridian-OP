@@ -257,6 +257,32 @@ console.log("\n[10] RPC failover + safe mode");
   up["https://backup.example"] = true;
   await tick();
   check("recovery leaves safe mode", !R.isRpcSafeMode() && alerts.includes("RPC_RECOVERED"));
+
+  // Error-driven rotation from real requests (not only probes).
+  R._resetRpcHealth(["https://a.example", "https://b.example", "https://c.example"]);
+  const now0 = T0;
+  R.reportRpcOutcome("https://a.example", false, 429, now0);
+  check("429 on active → rotate immediately", R.getActiveRpcUrl() === "https://b.example");
+  check("rate-limited endpoint ordered last", R.orderedRpcUrls(now0 + 1000).at(-1) === "https://a.example");
+  R.reportRpcOutcome("https://b.example", false, 503, now0 + 1000);
+  R.reportRpcOutcome("https://b.example", false, 0, now0 + 2000);
+  check("2 errors < threshold → stay", R.getActiveRpcUrl() === "https://b.example");
+  R.reportRpcOutcome("https://b.example", true, 200, now0 + 2500);
+  R.reportRpcOutcome("https://b.example", false, 503, now0 + 3000);
+  R.reportRpcOutcome("https://b.example", false, 503, now0 + 3500);
+  check("success resets the error streak", R.getActiveRpcUrl() === "https://b.example");
+  R.reportRpcOutcome("https://b.example", false, 503, now0 + 4000);
+  check("3 errors in window → rotate to next healthy", R.getActiveRpcUrl() === "https://c.example");
+  const st = R.rpcStatus(now0 + 5000);
+  check("status shows cooldowns by name, no URLs", st.endpoints.filter((e) => e.cooling_sec > 0).length === 2 && !JSON.stringify(st).includes("https://"));
+
+  const parsed = R.parseEndpointsFile({ endpoints: [
+    { name: "helius-1", url: "https://mainnet.helius-rpc.com/?api-key=x" },
+    { name: "off", url: "https://off.example", enabled: false },
+    { name: "bad", url: "ftp://nope" },
+    "https://plain.example",
+  ] });
+  check("parse rpc-endpoints.json (skip disabled / invalid, accept strings)", parsed.length === 2 && parsed[0].name === "helius-1" && parsed[1].url === "https://plain.example");
   R._resetRpcHealth(null);
 }
 

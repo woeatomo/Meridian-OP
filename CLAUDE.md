@@ -424,8 +424,10 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
 - **Partial TP**: `partial_close_position` tool (WRITE, lock priority 8) → `withdrawLiquidity(bps)` + guarded swap;
   progress in `state.positions[addr].partial_tp`. Pollers emit `PARTIAL_TP*` through `registerExitSignal`.
   When `partialTpEnabled`, exit Rule 2 uses `partialTpFinalPct` instead of `takeProfitPct`.
-- **RPC failover** (`modules/rpc-health.js`): `rpcConnection()` replaces the old single-URL `getConnection()` in
-  dlmm/wallet/pnl. Safe mode (`isRpcSafeMode`) blocks deploy (via `getDeployBlock`) and reshape.
+- **RPC failover** (`modules/rpc-health.js`): endpoints = RPC_URL + `rpc-endpoints.json` (gitignored, hot-reloaded)
+  + RPC_URLS + FALLBACK_RPC_URL. `rpcConnection()` (dlmm/wallet/pnl) and `standalone/rpc.js#readRpc` use
+  `trackedFetch`, which reports every request: 429 → cooldown + rotate, repeated 5xx/network → cooldown + rotate.
+  Never log endpoint URLs (API keys) — names only. Safe mode (`isRpcSafeMode`) blocks deploy and reshape.
 - **Dump history persistence**: `enableHistoryPersistence(repoPath("dump-history.json"))` in both runtimes' start.
 - Tests: `npm run test:op` (pure, no network).
 

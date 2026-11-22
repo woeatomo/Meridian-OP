@@ -429,6 +429,7 @@ const BOT_COMMANDS = [
   { command: "resume",     description: "Start cron cycles again" },
   { command: "guard",      description: "Portfolio guard status / reset" },
   { command: "regime",     description: "Regime gate status + report" },
+  { command: "rpc",        description: "RPC endpoints status" },
   { command: "stop",       description: "Shut down agent" },
 ];
 

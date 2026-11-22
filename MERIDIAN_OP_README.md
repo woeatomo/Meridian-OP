@@ -19,7 +19,7 @@ pernah dipanggil).
 | 9 | **Smart Wallet Exit Watch** (standalone) — wallet pemicu entry + posisi DLMM mereka dicatat di posisi kita. Tiap `walletExitCheckSec` (60 dtk) dicek: posisi mereka ditutup (dan tidak pindah ke posisi baru di pool yang sama) atau likuiditas turun ≥ `walletExitShareDropPct` (50%) = keluar. ≥ `walletExitMinWallets` (2) keluar → Rule 6 menutup posisi (`walletExitAction: "log"` = hanya catat). Gagal baca = tidak dihitung. | `modules/wallet-exit-watch.js`, `exit-rules.js` Rule 6 |
 | 10 | **Partial TP** (`partialTpEnabled`) — +5% tarik 50% ukuran awal, +10% tarik 25% lagi (fee diklaim, token dijual ke SOL lewat swap guard); sisanya jalan dengan trailing / SL. TP penuh pindah ke `partialTpFinalPct` (+20%). Dikonfirmasi 2 tick seperti exit; gagal = jeda 5 mnt. PnL tetap kontinu (Meteora menghitung withdrawal). | `modules/partial-tp.js`, `modules/partial-tp-runner.js`, tool `partial_close_position` |
 | 11 | **Riwayat detektor dump tersimpan** di `dump-history.json` (tiap 30 dtk + saat shutdown); dipulihkan saat start (data > 45 mnt dibuang). Restart tidak lagi membuat bot "buta" dump. | `modules/dump-detector.js` |
-| 12 | **RPC failover** — kirim tx, baca pool, saldo, PnL RPC memakai endpoint aktif dari monitor (probe tiap 15 dtk). Primary gagal 2x → pindah ke `FALLBACK_RPC_URL`; kembali setelah primary sehat 3x. Semua mati > 60 dtk → **safe mode**: deploy & reshape diblokir, close tetap dicoba. Alert Telegram RPC_FAILOVER / RPC_DOWN / RPC_RECOVERED. | `modules/rpc-health.js` |
+| 12 | **RPC failover multi-endpoint** — daftar RPC dari `RPC_URL` + `rpc-endpoints.json` (contoh: `rpc-endpoints.example.json`, dibaca ulang otomatis tanpa restart) + `RPC_URLS` + `FALLBACK_RPC_URL`. Semua request (kirim tx, pool, saldo, PnL, monitor wallet) memakai endpoint aktif. HTTP 429 → endpoint diistirahatkan 60 dtk dan langsung pindah; 3 error 5xx/timeout dalam 30 dtk → istirahat 120 dtk dan pindah; probe getSlot hemat (aktif tiap 15 dtk, cadangan tiap 60 dtk). Kembali ke `RPC_URL` setelah sehat 3x. Semua mati > 60 dtk → **safe mode** (deploy & reshape diblokir, close tetap dicoba). `node cli.js rpc` / `/rpc` untuk status. URL tidak pernah di-log. | `modules/rpc-health.js`, `standalone/rpc.js` |
 
 ### Reshape (Spot → Bid-Ask, satu arah ke bawah)
 
@@ -51,7 +51,9 @@ Lessons / pool-memory mencatat satu trade per lineage (modal awal + total durasi
   safety check masih 1 posisi/pool. Ditunda sampai ada data shadow.
 - Fee harvest, sizing, wallet score: modulnya masih fungsi murni yang belum disambungkan ke runtime.
 - Smart Wallet Exit Watch hanya untuk mode standalone (mode legacy tidak mencatat wallet pemicu).
-- Set `FALLBACK_RPC_URL` di `.env` (RPC provider lain dari primary) agar failover berguna.
+- Isi `rpc-endpoints.json` (salin dari `rpc-endpoints.example.json`) dengan RPC dari provider berbeda agar failover berguna.
+- WebSocket monitor smart wallet tetap di `MONITOR_WS_URL`/RPC utama; kalau WS mati, entry tetap tertangkap lewat
+  rekonsiliasi berkala (`walletReconcileSec`) yang sudah ikut failover — hanya lebih lambat.
 - Format respons OHLCV Meteora belum diverifikasi dari container build; parser dibuat defensif.
   Bila fetch gagal, sinyal candle dianggap tidak aktif (dump butuh harga + bin).
 

@@ -198,6 +198,12 @@ export const config = {
     rpcFailbackAfterOk:       u.rpcFailbackAfterOk       ?? 3,
     rpcSafeModeSec:           u.rpcSafeModeSec           ?? 60,
     rpcProbeTimeoutMs:        u.rpcProbeTimeoutMs        ?? 8000,
+    rpcProbeOthersEvery:      u.rpcProbeOthersEvery      ?? 4,    // probe endpoint cadangan tiap N tick (hemat kredit)
+    rpcPreferPrimary:         u.rpcPreferPrimary         ?? true, // kembali ke RPC_URL setelah sehat lagi
+    rpcRateLimitCooldownSec:  u.rpcRateLimitCooldownSec  ?? 60,   // HTTP 429 -> istirahatkan endpoint
+    rpcErrorThreshold:        u.rpcErrorThreshold        ?? 3,    // error 5xx/timeout dalam window -> pindah
+    rpcErrorWindowSec:        u.rpcErrorWindowSec        ?? 30,
+    rpcErrorCooldownSec:      u.rpcErrorCooldownSec      ?? 120,
     // Meridian-OP: Regime gate (modules/regime-runner.js) — "off" | "log" | "enforce".
     regimeGateMode:         u.regimeGateMode         ?? "log",
     regimeSol24hDropPct:    u.regimeSol24hDropPct    ?? -10,

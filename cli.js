@@ -655,6 +655,18 @@ switch (subcommand) {
     break;
   }
 
+  // ── rpc (Meridian-OP RPC endpoints health) ────────────────────
+  case "rpc": {
+    const { checkRpcHealth, formatRpcStatus } = await import("./modules/rpc-health.js");
+    await checkRpcHealth();
+    // Probe every endpoint once so the report is complete (cheap: one getSlot each).
+    const { config } = await import("./config.js");
+    config.management.rpcProbeOthersEvery = 1;
+    await checkRpcHealth();
+    console.log(formatRpcStatus());
+    break;
+  }
+
   // ── regime (Meridian-OP regime gate report) ───────────────────
   case "regime": {
     const { getRegimeMetrics, formatRegimeReport } = await import("./modules/regime-runner.js");

@@ -54,3 +54,4 @@ wallet-monitor-state.json.tmp
 standalone.lock
 dump-history.json
 dump-history.json.tmp
+rpc-endpoints.json

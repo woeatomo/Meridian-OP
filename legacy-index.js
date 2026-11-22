@@ -17,7 +17,7 @@ import { regimeGate } from "./modules/regime-gate.js";
 import { maybeReshape } from "./modules/reshape-runner.js";
 import { partialTpSignal, markPartialAttempt } from "./modules/partial-tp-runner.js";
 import { enableHistoryPersistence, flushHistory } from "./modules/dump-detector.js";
-import { startRpcHealthMonitor } from "./modules/rpc-health.js";
+import { startRpcHealthMonitor, formatRpcStatus } from "./modules/rpc-health.js";
 import {
   startPolling,
   stopPolling,
@@ -1307,6 +1307,7 @@ function formatHelpText() {
     "/briefing — morning briefing",
     "/guard — portfolio guard status (daily loss / kill switch)",
     "/regime — regime gate status + would-block vs normal deploy results",
+    "/rpc — RPC endpoints status (active, cooling, errors)",
     "/guard reset — re-baseline equity after a manual deposit/withdraw",
     "/guard reset kill — also clear an active kill switch",
     "/hive — HiveMind sync status",
@@ -1435,6 +1436,11 @@ async function telegramHandler(msg) {
     } else {
       sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
     }
+    return;
+  }
+
+  if (text === "/rpc") {
+    await sendMessage(formatRpcStatus()).catch(() => {});
     return;
   }
 
