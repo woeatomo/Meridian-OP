@@ -14,6 +14,7 @@ pernah dipanggil).
 | 4 | **Reshape** — keputusan + eksekusi + PnL berantai. Lihat bagian Reshape. | `modules/reshape-manager.js`, `modules/reshape-runner.js`, `tools/dlmm.js#reshapePosition` |
 | 5 | **Cooldown token** — 2x Emergency SL dalam 24 jam pada token yang sama → token + pool cooldown 24 jam. | `pool-memory.js` |
 | 6 | Alert Telegram untuk Emergency SL dan reshape. CLI `withdraw-liquidity` / `add-liquidity` yang dulu rusak (fungsi tidak di-export) sekarang jalan; tambah CLI `reshape`. | `telegram.js`, `cli.js` |
+| 7 | **Daily loss limit + kill switch** — ekuitas (wallet + posisi, default dalam SOL) dicek tiap siklus manajemen dan tiap 60 dtk dari poller. Rugi harian ≤ `dailyLossLimitPct` (−5%) dari awal hari WIB → stop deploy sampai besok. Drawdown ≤ `portfolioKillSwitchPct` (−10%) dari peak → tutup semua posisi + pause entry `killSwitchPauseHours` (24 jam). Data ekuitas tidak lengkap → hanya blok deploy, tidak pernah menutup posisi. | `modules/portfolio-runner.js`, `modules/portfolio-guard.js`, `tools/executor.js` (gate deploy) |
 
 ### Reshape (Spot → Bid-Ask, satu arah ke bawah)
 
@@ -43,8 +44,8 @@ Lessons / pool-memory mencatat satu trade per lineage (modal awal + total durasi
 ### Belum dikerjakan (sengaja)
 - **Reshape parsial dulu** (spec: "partial dulu") — butuh dua posisi per pool sementara, sedangkan
   safety check masih 1 posisi/pool. Ditunda sampai ada data shadow.
-- Regime gate, daily loss limit / kill switch, partial TP, fee harvest, sizing, wallet score, health:
-  modulnya masih fungsi murni yang belum disambungkan ke runtime.
+- Regime gate, partial TP, fee harvest, sizing, wallet score, health: modulnya masih fungsi murni
+  yang belum disambungkan ke runtime.
 - Format respons OHLCV Meteora belum diverifikasi dari container build; parser dibuat defensif.
   Bila fetch gagal, sinyal candle dianggap tidak aktif (dump butuh harga + bin).
 
@@ -67,6 +68,20 @@ Jalankan dulu dalam shadow / DRY_RUN (`shadowMode: true` atau `npm run dev`), ce
 ```bash
 npm run pm2:restart
 ```
+
+Portfolio guard: status dan reset baseline. **Setelah deposit / withdraw manual ke wallet bot,
+selalu reset** — kalau tidak, transfer itu terbaca sebagai profit / rugi:
+
+```bash
+node cli.js guard
+```
+
+```bash
+node cli.js guard --reset
+```
+
+(`--reset --clear-kill` juga mencabut kill switch yang sedang aktif. Mode legacy punya `/guard`,
+`/guard reset`, `/guard reset kill` di Telegram.)
 
 Uji manual satu posisi (respek `reshapeEnabled`; di DRY_RUN hanya menampilkan rencana):
 

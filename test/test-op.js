@@ -143,5 +143,25 @@ console.log("\n[5] swap guard");
   check("guard allows unknown impact (never strands exits)", swapGuard({ priceImpactPct: null, maxPriceImpactPct: 3 }).allow === true);
 }
 
+console.log("\n[6] portfolio guard (daily loss + kill switch)");
+{
+  const { portfolioGuard } = await import("../modules/portfolio-guard.js");
+  const { computeEquity, tradingDay } = await import("../modules/portfolio-runner.js");
+  const g = (x) => portfolioGuard({ dayStartEquity: 10, peakEquity: 10, now: T0, ...x }, cfg);
+  check("flat → allow", g({ equity: 10 }).allowDeploy === true);
+  check("-5% day → block deploys, no kill", g({ equity: 9.5, peakEquity: 9.6 }).tripped === "daily_loss" && !g({ equity: 9.5, peakEquity: 9.6 }).killSwitch);
+  check("-10% from peak → kill switch", g({ equity: 9, peakEquity: 10, dayStartEquity: 9.2 }).killSwitch === true);
+  check("kill already active → no deploy, no second kill", (() => { const d = g({ equity: 9, killSwitchUntil: T0 + 1000 }); return !d.allowDeploy && !d.killSwitch; })());
+  check("incomplete data → block deploys, NEVER kill", (() => { const d = portfolioGuard({ equity: null, dayStartEquity: 10 }, cfg); return !d.allowDeploy && !d.killSwitch; })());
+
+  const bal = { sol: 2, sol_price: 100, tokens: [{ mint: "A", usd: 50 }, { mint: "Dust", usd: null }] };
+  const eq = computeEquity(bal, [{ position: "p", total_value_true_usd: 150, unclaimed_fees_true_usd: 10 }], "sol");
+  check("equity in SOL = (wallet + positions + fees) / SOL price; unpriced dust ignored", Math.abs(eq.equity - 4.1) < 1e-9, JSON.stringify(eq));
+  check("equity in USD", computeEquity(bal, [], "usd").equity === 250);
+  check("missing position value → error (no false loss)", !!computeEquity(bal, [{ position: "p" }], "sol").error);
+  check("missing SOL price → error", !!computeEquity({ sol: 1, tokens: [] }, [], "sol").error);
+  check("trading day uses WIB offset", tradingDay(Date.UTC(2026, 10, 22, 18, 0), 7) === "2026-11-23" && tradingDay(Date.UTC(2026, 10, 22, 16, 0), 7) === "2026-11-22");
+}
+
 console.log(failed === 0 ? "\nALL TESTS PASSED" : `\n${failed} TEST(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

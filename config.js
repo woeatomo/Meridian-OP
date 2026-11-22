@@ -174,6 +174,11 @@ export const config = {
     // Meridian-OP: Portfolio guard (modules/portfolio-guard.js)
     dailyLossLimitPct:      u.dailyLossLimitPct      ?? -5,
     portfolioKillSwitchPct: u.portfolioKillSwitchPct ?? -10,
+    portfolioGuardEnabled:  u.portfolioGuardEnabled  ?? true,
+    portfolioGuardUnit:     u.portfolioGuardUnit     ?? "sol",  // "sol" | "usd" — ekuitas diukur dalam satuan ini
+    portfolioDayUtcOffsetHours: u.portfolioDayUtcOffsetHours ?? 7, // hari trading = WIB
+    portfolioGuardCheckSec: u.portfolioGuardCheckSec ?? 60,     // evaluasi dari poller maks tiap N detik
+    killSwitchPauseHours:   u.killSwitchPauseHours   ?? 24,
     maxHoldMinutes:         u.maxHoldMinutes         ?? 2880,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close

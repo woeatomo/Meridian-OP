@@ -43,7 +43,13 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
-import { notifyDeploy, notifyClose, notifySwap, notifyReshape } from "../telegram.js";
+import { notifyDeploy, notifyClose, notifySwap, notifyReshape, notifyAlert } from "../telegram.js";
+import { evaluatePortfolio, getDeployBlock, isPortfolioStateStale } from "../modules/portfolio-runner.js";
+
+/** Telegram sink for portfolio-guard alerts (daily loss / kill switch). */
+export function portfolioNotify(kind, text) {
+  notifyAlert(kind, text).catch(() => {});
+}
 
 function numberOrNull(value) {
   const n = Number(value);
@@ -425,6 +431,13 @@ const toolMap = {
       maxSwapPriceImpactPct: ["management", "maxSwapPriceImpactPct"],
       swapMaxChunks: ["management", "swapMaxChunks"],
       relayCloseSlippageBps: ["management", "relayCloseSlippageBps"],
+      dailyLossLimitPct: ["management", "dailyLossLimitPct"],
+      portfolioKillSwitchPct: ["management", "portfolioKillSwitchPct"],
+      portfolioGuardEnabled: ["management", "portfolioGuardEnabled"],
+      portfolioGuardUnit: ["management", "portfolioGuardUnit"],
+      portfolioDayUtcOffsetHours: ["management", "portfolioDayUtcOffsetHours"],
+      portfolioGuardCheckSec: ["management", "portfolioGuardCheckSec"],
+      killSwitchPauseHours: ["management", "killSwitchPauseHours"],
       // pnl poller
       pnlConfirmTicks: ["pnl", "confirmTicks"],
       // opportunity poller (interval/enabled changes apply on next restart)
@@ -844,6 +857,15 @@ async function runSafetyChecks(name, args) {
     case "deploy_position": {
       if (config.standalone.enabled && typeof args.before_submit !== "function") {
         return { pass: false, reason: "Standalone entries require a fresh wallet-convergence signal" };
+      }
+      // Meridian-OP portfolio guard: daily loss limit + kill switch block new entries.
+      const guardBlock = getDeployBlock();
+      if (guardBlock) return { pass: false, reason: `Portfolio guard: ${guardBlock}` };
+      if (config.management.portfolioGuardEnabled !== false && isPortfolioStateStale()) {
+        const fresh = await getMyPositions({ force: true, silent: true });
+        if (fresh.error || !Array.isArray(fresh.positions)) return { pass: false, reason: "Position read unavailable" };
+        const decision = await evaluatePortfolio({ positions: fresh.positions, getWalletBalances, notify: portfolioNotify });
+        if (decision && !decision.allowDeploy) return { pass: false, reason: `Portfolio guard: ${decision.reason}` };
       }
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;

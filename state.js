@@ -225,6 +225,21 @@ export function setPositionLineage(position_address, lineage, carry = {}) {
   return true;
 }
 
+// ─── Portfolio guard state (Meridian-OP daily loss + kill switch) ──
+// { day, day_start_equity, peak_equity, last_equity, last_at, unit,
+//   day_blocked, day_blocked_reason, kill_switch_until, kill_switch_reason, alerts: {key: iso} }
+
+export function getPortfolioState() {
+  return load().portfolio || {};
+}
+
+export function savePortfolioState(patch) {
+  const state = load();
+  state.portfolio = { ...(state.portfolio || {}), ...patch };
+  save(state);
+  return state.portfolio;
+}
+
 // ─── Pending swaps (Meridian-OP swap guard) ────────────────────
 // Base tokens left in the wallet because the swap guard blocked (price impact
 // too high) or Jupiter failed. The management cycle retries them.

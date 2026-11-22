@@ -10,7 +10,8 @@ import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
-import { executeTool, registerCronRestarter, sweepPendingSwaps } from "./tools/executor.js";
+import { executeTool, registerCronRestarter, sweepPendingSwaps, portfolioNotify } from "./tools/executor.js";
+import { evaluatePortfolio, getDeployBlock, formatGuardStatus, resetGuardNow } from "./modules/portfolio-runner.js";
 import { maybeReshape } from "./modules/reshape-runner.js";
 import {
   startPolling,
@@ -241,6 +242,13 @@ export async function runManagementCycle({ silent = false } = {}) {
     if (livePositions && !livePositions.error) {
       await sweepPendingSwaps({ openBaseMints: positions.map((p) => p.base_mint).filter(Boolean) })
         .catch((e) => log("cron_warn", `Pending swap sweep failed: ${e.message}`));
+      // Meridian-OP portfolio guard: daily loss limit + kill switch (closes all on trip).
+      const guard = await evaluatePortfolio({ positions, getWalletBalances, executeTool, notify: portfolioNotify })
+        .catch((e) => { log("cron_warn", `Portfolio guard failed: ${e.message}`); return null; });
+      if (guard?.closed?.length) {
+        mgmtReport = `🚨 Kill switch: closed ${guard.closed.filter((c) => c.ok).length}/${guard.closed.length} position(s). ${guard.reason}`;
+        return mgmtReport;
+      }
     }
 
     if (positions.length === 0) {
@@ -388,6 +396,14 @@ export async function runScreeningCycle({ silent = false } = {}) {
         summary: "Screening skipped",
         reason: `Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`,
       });
+      _screeningBusy = false;
+      return screenReport;
+    }
+    const guardBlock = getDeployBlock();
+    if (guardBlock) {
+      log("cron", `Screening skipped — portfolio guard: ${guardBlock}`);
+      screenReport = `Screening skipped — portfolio guard: ${guardBlock}.`;
+      appendDecision({ type: "skip", actor: "SCREENER", summary: "Screening skipped", reason: `Portfolio guard: ${guardBlock}` });
       _screeningBusy = false;
       return screenReport;
     }
@@ -739,6 +755,16 @@ Summarize the current portfolio health, total fees earned, and performance of al
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions?.length) return;
+      // Portfolio guard between management cycles (throttled; closes all on kill switch).
+      _managementBusy = true;
+      let guard = null;
+      try {
+        guard = await evaluatePortfolio({
+          positions: result.positions, getWalletBalances, executeTool, notify: portfolioNotify,
+          minIntervalMs: Math.max(10, Number(config.management.portfolioGuardCheckSec ?? 60)) * 1000,
+        }).catch((e) => { log("cron_warn", `Portfolio guard failed: ${e.message}`); return null; });
+      } finally { _managementBusy = false; }
+      if (guard?.closed?.length) return;
       for (const p of result.positions) {
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
 
@@ -1256,6 +1282,9 @@ function formatHelpText() {
     "/candidates — show latest cached candidates",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
+    "/guard — portfolio guard status (daily loss / kill switch)",
+    "/guard reset — re-baseline equity after a manual deposit/withdraw",
+    "/guard reset kill — also clear an active kill switch",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
@@ -1381,6 +1410,20 @@ async function telegramHandler(msg) {
       sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
     } else {
       sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/guard" || text.startsWith("/guard ")) {
+    try {
+      const arg = text.slice(6).trim().toLowerCase();
+      if (arg === "reset" || arg === "reset kill") {
+        await sendMessage(await resetGuardNow({ getMyPositions, getWalletBalances, clearKill: arg === "reset kill" }));
+      } else {
+        await sendMessage(formatGuardStatus());
+      }
+    } catch (e) {
+      await sendMessage(`Guard error: ${e.message}`).catch(() => {});
     }
     return;
   }

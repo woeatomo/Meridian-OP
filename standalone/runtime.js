@@ -15,7 +15,8 @@ import { WalletMonitor } from "./monitor.js";
 import { screenMint, poolDetail } from "./screening.js";
 import { exposureStillPresent } from "./events.js";
 import { getMyPositions } from "../tools/dlmm.js";
-import { executeTool, sweepPendingSwaps } from "../tools/executor.js";
+import { executeTool, sweepPendingSwaps, portfolioNotify } from "../tools/executor.js";
+import { evaluatePortfolio, getDeployBlock } from "../modules/portfolio-runner.js";
 import { maybeReshape } from "../modules/reshape-runner.js";
 import { getWalletBalances } from "../tools/wallet.js";
 import { getTrackedPositions, confirmPeak, updatePnlAndCheckExits, registerExitSignal, syncOpenPositions } from "../state.js";
@@ -102,6 +103,11 @@ async function attemptEntry(signal) {
   if (!positions || positions.error || !Array.isArray(positions.positions)) return "position read unavailable";
   if (positions.positions.length >= config.risk.maxPositions) {
     finishSignal(store, signal, "portfolio full");
+    return null;
+  }
+  const guardBlock = getDeployBlock();
+  if (guardBlock) {
+    finishSignal(store, signal, `portfolio guard: ${guardBlock}`);
     return null;
   }
 
@@ -227,6 +233,10 @@ export async function manageOnce() {
     // Meridian-OP: retry base tokens the swap guard left unsold (not ones still in a position).
     await sweepPendingSwaps({ openBaseMints: live.positions.map(p => p.base_mint).filter(Boolean) })
       .catch(e => log("manage_warn", `Pending swap sweep failed: ${e.message}`));
+    // Meridian-OP portfolio guard: daily loss limit + kill switch (closes all on trip).
+    const guard = await evaluatePortfolio({ positions: live.positions, getWalletBalances, executeTool, notify: portfolioNotify })
+      .catch(e => { log("manage_warn", `Portfolio guard failed: ${e.message}`); return null; });
+    if (guard?.closed?.length) return `Kill switch: closed ${guard.closed.filter(c => c.ok).length}/${guard.closed.length} position(s)`;
     if (live.positions.length === 0) return "No open positions";
     for (const p of live.positions) {
       recordPositionSnapshot(p.pool, p);
@@ -267,6 +277,16 @@ function startPnlPoller() {
     try {
       const live = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!live?.positions?.length) return;
+      // Portfolio guard between management cycles (throttled; closes all on kill switch).
+      manageBusy = true;
+      let guard = null;
+      try {
+        guard = await evaluatePortfolio({
+          positions: live.positions, getWalletBalances, executeTool, notify: portfolioNotify,
+          minIntervalMs: Math.max(10, Number(config.management.portfolioGuardCheckSec ?? 60)) * 1000,
+        }).catch(e => { log("poll", `Portfolio guard failed: ${e.message}`); return null; });
+      } finally { manageBusy = false; }
+      if (guard?.closed?.length) return;
       for (const p of live.positions) {
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
         const exit = updatePnlAndCheckExits(p.position, p, config.management);

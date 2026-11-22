@@ -1,20 +1,30 @@
 // portfolio-guard.js — P0 B3 + P1 C2.
 // Lokasi yang disarankan: repo root / standalone/
 // Pure functions. Dipanggil tiap cycle manager sebelum deploy / reshape.
-// Input guard: { dayStartEquityUsd, equityUsd, peakEquityUsd }
+// Input guard: { dayStartEquity, equity, peakEquity, killSwitchUntil, now } — satuan bebas (SOL atau USD), konsisten.
 // Input hold: { ageMinutes, fee24hUsd, positionUsd }
-export function portfolioGuard(g) {
-  if (!g || !g.dayStartEquityUsd || !g.equityUsd) {
-    return { allowDeploy: false, killSwitch: true, reason: "equity data incomplete — safe mode" };
+export function portfolioGuard(g, cfg = {}) {
+  const dailyLimit = Number(cfg.dailyLossLimitPct ?? -5);
+  const killPct = Number(cfg.portfolioKillSwitchPct ?? -10);
+  const now = g?.now ?? Date.now();
+  // Kill switch already tripped: no deploys until it expires (positions already closed).
+  if (g?.killSwitchUntil && now < g.killSwitchUntil) {
+    return { allowDeploy: false, killSwitch: false, tripped: "kill_switch", reason: `kill switch active until ${new Date(g.killSwitchUntil).toISOString()}` };
   }
-  const dayPnlPct = ((g.equityUsd - g.dayStartEquityUsd) / g.dayStartEquityUsd) * 100;
-  if (dayPnlPct <= -5) {
-    return { allowDeploy: false, killSwitch: false, reason: `daily loss ${dayPnlPct.toFixed(2)}% <= -5% — stop deploy today` };
+  // Missing equity data = unknown, NOT a loss: block new deploys this tick, never close positions.
+  if (!g || !(g.dayStartEquity > 0) || !(g.equity > 0)) {
+    return { allowDeploy: false, killSwitch: false, tripped: null, reason: "equity data incomplete — no new deploys this tick" };
   }
-  if (g.peakEquityUsd && g.equityUsd < g.peakEquityUsd * 0.9) {
-    return { allowDeploy: false, killSwitch: true, reason: "drawdown -10% from peak — kill switch, close all, shadow 24h" };
+  const dayPnlPct = ((g.equity - g.dayStartEquity) / g.dayStartEquity) * 100;
+  const drawdownPct = g.peakEquity > 0 ? ((g.equity - g.peakEquity) / g.peakEquity) * 100 : 0;
+  const metrics = { dayPnlPct: Math.round(dayPnlPct * 100) / 100, drawdownPct: Math.round(drawdownPct * 100) / 100 };
+  if (drawdownPct <= killPct) {
+    return { allowDeploy: false, killSwitch: true, tripped: "kill_switch", ...metrics, reason: `drawdown ${metrics.drawdownPct}% from peak <= ${killPct}% — kill switch: close all, pause entries` };
   }
-  return { allowDeploy: true, killSwitch: false, reason: "portfolio guard OK" };
+  if (dayPnlPct <= dailyLimit) {
+    return { allowDeploy: false, killSwitch: false, tripped: "daily_loss", ...metrics, reason: `daily loss ${metrics.dayPnlPct}% <= ${dailyLimit}% — no new deploys today` };
+  }
+  return { allowDeploy: true, killSwitch: false, tripped: null, ...metrics, reason: "portfolio guard OK" };
 }
 
 // P1 C2: max hold 48 jam / fee decay. Tutup bila fee 24 jam terakhir < 1% posisi

@@ -655,6 +655,20 @@ switch (subcommand) {
     break;
   }
 
+  // ── guard (Meridian-OP portfolio guard) ───────────────────────
+  case "guard": {
+    const { formatGuardStatus, resetGuardNow } = await import("./modules/portfolio-runner.js");
+    const reset = argv.includes("--reset");
+    if (reset) {
+      const { getMyPositions } = await import("./tools/dlmm.js");
+      const { getWalletBalances } = await import("./tools/wallet.js");
+      console.log(await resetGuardNow({ getMyPositions, getWalletBalances, clearKill: argv.includes("--clear-kill") }));
+    } else {
+      console.log(formatGuardStatus());
+    }
+    break;
+  }
+
   // ── reshape (Meridian-OP) ──────────────────────────────────────
   case "reshape": {
     if (!flags.position) die("Usage: meridian reshape --position <addr> [--strategy bid_ask|spot|curve] [--force]");

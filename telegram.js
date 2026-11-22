@@ -427,6 +427,7 @@ const BOT_COMMANDS = [
   { command: "hive",       description: "HiveMind sync status" },
   { command: "pause",      description: "Stop cron cycles" },
   { command: "resume",     description: "Start cron cycles again" },
+  { command: "guard",      description: "Portfolio guard status / reset" },
   { command: "stop",       description: "Shut down agent" },
 ];
 

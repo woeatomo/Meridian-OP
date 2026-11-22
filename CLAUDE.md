@@ -410,6 +410,11 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
   Lineage lives in `state.json positions[addr].lineage` (`pnl_factor`, `reshape_count`, `anchor_top_bin`, …).
 - **Swap guard**: `swapToken({ max_price_impact_pct })` refuses before signing; `swapBaseToSolWithRetry` splits
   and queues leftovers in `state.json pendingSwaps`, swept by both management cycles (`sweepPendingSwaps`).
+- **Portfolio guard** (`modules/portfolio-runner.js`): equity = wallet + open positions (SOL by default), state in
+  `state.json portfolio`. `evaluatePortfolio` runs in both management cycles and (throttled, `portfolioGuardCheckSec`)
+  in the fast pollers; a kill-switch trip closes every position via `executeTool("close_position")`. The deploy gate is
+  `getDeployBlock()` in `runSafetyChecks(deploy_position)` + early skips in the screening paths. Manual
+  deposits/withdrawals need `cli.js guard --reset`.
 - Tests: `npm run test:op` (pure, no network).
 
 ## Known issues / tech debt (verified by reading the code)
