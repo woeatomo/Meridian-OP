@@ -182,5 +182,107 @@ console.log("\n[7] regime gate (acute rules, fail-open)");
   check("parse Binance fallback", bn.solChange24hPct === -11.2 && Math.abs(bn.btcChange1hPct + 6) < 1e-9);
 }
 
+console.log("\n[8] smart wallet exit watch");
+{
+  const { evaluateTriggerExits, triggerStatus } = await import("../modules/wallet-exit-watch.js");
+  const t = (wallet) => ({ wallet, position: `P${wallet}`, pool: "PoolX", shares: "1000" });
+  const deps = (snaps, pools = {}, failSnap = new Set()) => ({
+    snapshot: async (position, wallet) => { if (failSnap.has(wallet)) throw new Error("rpc"); return snaps[wallet] ?? null; },
+    walletPools: async (wallet) => { if (pools[wallet] === "err") throw new Error("api"); return pools[wallet] ?? []; },
+  });
+  check("still holding", (await triggerStatus(t("A"), deps({ A: { shares: "900" } }), cfg)).status === "holding");
+  check("removed >= 50% liquidity → exited", (await triggerStatus(t("A"), deps({ A: { shares: "400" } }), cfg)).status === "exited");
+  check("position closed, same pool still open → re-positioned (holding)", (await triggerStatus(t("A"), deps({}, { A: ["PoolX"] }), cfg)).status === "holding");
+  check("position closed, pool gone → exited", (await triggerStatus(t("A"), deps({}, { A: ["Other"] }), cfg)).status === "exited");
+  check("RPC error → unknown (never counted)", (await triggerStatus(t("A"), deps({}, {}, new Set(["A"])), cfg)).status === "unknown");
+  check("portfolio error → unknown", (await triggerStatus(t("A"), deps({}, { A: "err" }), cfg)).status === "unknown");
+  const r = (status, wallet = "WalletXYZ") => ({ wallet, status, detail: status });
+  check("2 of 3 exited → signal", evaluateTriggerExits([r("exited"), r("exited"), r("holding")], cfg).exitSignal);
+  check("1 of 3 exited → no signal", !evaluateTriggerExits([r("exited"), r("holding"), r("holding")], cfg).exitSignal);
+  check("single trigger wallet exited → signal (min capped to count)", evaluateTriggerExits([r("exited")], cfg).exitSignal);
+  check("unknowns don't count", !evaluateTriggerExits([r("exited"), r("unknown"), r("unknown")], cfg).exitSignal);
+  const pos = { position: "PosW", pnl_pct: 1, active_bin: 100, upper_bin: 120, lower_bin: 60, age_minutes: 90, fee_per_tvl_24h: 10, wallet_exit_signal: true, wallet_exit_reason: "smart wallets exited (2/2)" };
+  check("Rule 6 closes on wallet exit", getDeterministicCloseRule(pos, cfg)?.rule === 6);
+  check("walletExitAction=log → no close", getDeterministicCloseRule(pos, { ...cfg, walletExitAction: "log" }) === null);
+}
+
+console.log("\n[9] partial take profit");
+{
+  const { partialTp } = await import("../modules/partial-tp.js");
+  const pcfg = { ...cfg, partialTpEnabled: true };
+  check("disabled → hold", partialTp({ pnlPct: 8 }, cfg).action === "HOLD");
+  const d1 = partialTp({ pnlPct: 5.2, state: {} }, pcfg);
+  check("TP1 at +5% → 50% of original = 5000 bps", d1.stage === "tp1" && d1.bps === 5000 && d1.fraction === 0.5, JSON.stringify(d1));
+  const d2 = partialTp({ pnlPct: 10.5, state: { tp1_done: true, withdrawn_fraction: 0.5 } }, pcfg);
+  check("TP2 at +10% → 25% of original = 50% of remaining", d2.stage === "tp2" && d2.bps === 5000 && d2.fraction === 0.25, JSON.stringify(d2));
+  const d12 = partialTp({ pnlPct: 11, state: {} }, pcfg);
+  check("gap through both → one 75% withdrawal", d12.stage === "tp1+tp2" && d12.bps === 7500);
+  check("both done → hold (runner on trailing)", partialTp({ pnlPct: 15, state: { tp1_done: true, tp2_done: true, withdrawn_fraction: 0.75 } }, pcfg).action === "HOLD");
+  check("suspect PnL → hold", partialTp({ pnlPct: 9, pnlSuspicious: true, state: {} }, pcfg).action === "HOLD");
+  const tp = { position: "PosT", pnl_pct: 6, active_bin: 100, upper_bin: 120, lower_bin: 60, age_minutes: 90, fee_per_tvl_24h: 10 };
+  check("partial on: +6% no full TP close", getDeterministicCloseRule(tp, pcfg) === null);
+  check("partial on: full close at partialTpFinalPct", getDeterministicCloseRule({ ...tp, pnl_pct: 21 }, pcfg)?.rule === 2);
+  check("partial off: +6% full TP (unchanged)", getDeterministicCloseRule(tp, cfg)?.rule === 2);
+}
+
+console.log("\n[10] RPC failover + safe mode");
+{
+  const R = await import("../modules/rpc-health.js");
+  R._resetRpcHealth(["https://primary.example", "https://backup.example"]);
+  const up = { "https://primary.example": true, "https://backup.example": true };
+  const fetchImpl = async (url) => ({ ok: true, json: async () => (up[url] ? { result: 123 } : { error: { code: -1 } }) });
+  const alerts = [];
+  const notify = (k) => alerts.push(k);
+  let t = T0;
+  const tick = (dt = 15_000) => R.checkRpcHealth({ fetchImpl, notify, now: (t += dt) });
+  await tick();
+  check("starts on primary", R.getActiveRpcUrl() === "https://primary.example");
+  up["https://primary.example"] = false;
+  await tick();
+  check("1 failure → stay (no flapping)", R.getActiveRpcUrl() === "https://primary.example");
+  await tick();
+  check("2 failures → fail over to backup", R.getActiveRpcUrl() === "https://backup.example" && alerts.includes("RPC_FAILOVER"));
+  up["https://primary.example"] = true;
+  await tick(); await tick();
+  check("primary healthy 2x → still on backup", R.getActiveRpcUrl() === "https://backup.example");
+  await tick();
+  check("primary healthy 3x → fail back", R.getActiveRpcUrl() === "https://primary.example");
+  up["https://primary.example"] = false; up["https://backup.example"] = false;
+  await tick(); await tick(); await tick();
+  check("all down < 60s → not yet safe mode", !R.isRpcSafeMode());
+  await tick(); await tick();
+  check("all down >= 60s → SAFE MODE + alert", R.isRpcSafeMode() && alerts.includes("RPC_DOWN"));
+  const { getDeployBlock } = await import("../modules/portfolio-runner.js");
+  check("safe mode blocks deploys", /RPC safe mode/.test(getDeployBlock() || ""));
+  up["https://backup.example"] = true;
+  await tick();
+  check("recovery leaves safe mode", !R.isRpcSafeMode() && alerts.includes("RPC_RECOVERED"));
+  R._resetRpcHealth(null);
+}
+
+console.log("\n[11] dump detector history survives restart");
+{
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const D = await import("../modules/dump-detector.js");
+  const file = path.join(os.tmpdir(), `dump-history-test-${process.pid}.json`);
+  try { fs.unlinkSync(file); } catch {}
+  const now = Date.now();
+  D.enableHistoryPersistence(file, now);
+  D.recordTick("PosPersist", { active_bin: 500, pnl_pct: 0 }, now - 60_000);
+  D.recordTick("PosPersist", { active_bin: 490, pnl_pct: -3 }, now - 30_000);
+  D.flushHistory(now, true);
+  D.forgetPosition("PosPersist");
+  check("forgotten in memory", D.getHistory("PosPersist").length === 0);
+  const restored = D.enableHistoryPersistence(file, now);
+  check("restored ticks from file", restored >= 2 && D.getHistory("PosPersist").length === 2);
+  const stale = D.enableHistoryPersistence(file, now + 2 * 3600_000);
+  check("stale history (> 45m) dropped on load", stale === 0);
+  fs.writeFileSync(file, "{corrupt");
+  check("corrupt file → start fresh, no throw", D.enableHistoryPersistence(file, now) === 0);
+  try { fs.unlinkSync(file); } catch {}
+}
+
 console.log(failed === 0 ? "\nALL TESTS PASSED" : `\n${failed} TEST(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

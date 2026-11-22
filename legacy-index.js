@@ -15,6 +15,9 @@ import { evaluatePortfolio, getDeployBlock, formatGuardStatus, resetGuardNow } f
 import { getRegimeMetrics, formatRegimeReport } from "./modules/regime-runner.js";
 import { regimeGate } from "./modules/regime-gate.js";
 import { maybeReshape } from "./modules/reshape-runner.js";
+import { partialTpSignal, markPartialAttempt } from "./modules/partial-tp-runner.js";
+import { enableHistoryPersistence, flushHistory } from "./modules/dump-detector.js";
+import { startRpcHealthMonitor } from "./modules/rpc-health.js";
 import {
   startPolling,
   stopPolling,
@@ -776,6 +779,9 @@ Summarize the current portfolio health, total fees earned, and performance of al
         let signal = null, reason = null, rule = "exit";
         if (exit) { signal = exit.action; reason = exit.reason; }
         else if (closeRule) { signal = `RULE_${closeRule.rule}`; reason = closeRule.reason; rule = closeRule.rule; }
+        // Meridian-OP partial TP: takes a slice, confirmed like an exit.
+        const partial = signal ? null : partialTpSignal(p);
+        if (partial) { signal = partial.signal; reason = partial.reason; }
 
         // Require N consecutive confirming ticks before acting.
         const { fire } = registerExitSignal(p.position, signal, confirmTicks);
@@ -789,6 +795,20 @@ Summarize the current portfolio health, total fees earned, and performance of al
           continue;
         }
         if (!fire) continue;
+
+        if (partial) {
+          log("state", `[PnL poll] ${signal} confirmed (${confirmTicks} ticks): ${p.pair} — ${reason}`);
+          _managementBusy = true;
+          try {
+            const res = await executeTool("partial_close_position", partial.args).catch((e) => ({ error: e.message }));
+            const ok = res?.success === true || res?.dry_run === true;
+            markPartialAttempt(p.position, ok);
+            log("state", `[PnL poll] ${p.pair}: partial TP ${ok ? "done" : `FAILED — ${res?.error || res?.reason || "unknown"}`}`);
+          } finally {
+            _managementBusy = false;
+          }
+          break; // one action per tick
+        }
 
         log("state", `[PnL poll] ${signal} confirmed (${confirmTicks} ticks): ${p.pair} — ${reason} — closing directly`);
         if (/emergency/i.test(reason || "")) notifyAlert("EMERGENCY_SL", `${p.pair}: ${reason} — PnL ${p.pnl_pct}% | signals ${JSON.stringify(p.dump_signals ?? {})}`).catch(() => {});
@@ -898,6 +918,7 @@ async function shutdown(signal) {
     return;
   }
   _shuttingDown = true;
+  flushHistory(Date.now(), true);
 
   log("shutdown", `Received ${signal}. Shutting down...`);
   stopPolling();
@@ -2053,6 +2074,9 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
 
 export function startLegacy() {
   ensureAgentId();
+  startRpcHealthMonitor({ notify: portfolioNotify });
+  const restored = enableHistoryPersistence(repoPath("dump-history.json"));
+  if (restored) log("startup", `Dump detector: restored ${restored} price ticks from before restart`);
   bootstrapHiveMind().catch(e => log("hivemind_warn", e.message));
   startHiveMindBackgroundSync();
   startCronJobs();

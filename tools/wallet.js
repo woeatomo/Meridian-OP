@@ -10,13 +10,14 @@ import { rpcBalances, priceBalances } from "../standalone/balances.js";
 import { log } from "../logger.js";
 import { config } from "../config.js";
 import { swapGuard } from "../modules/swap-guard.js";
+import { rpcConnection } from "../modules/rpc-health.js";
 
 let _connection = null;
 let _wallet = null;
 
 function getConnection() {
-  if (!_connection) _connection = new Connection(process.env.RPC_URL, "confirmed");
-  return _connection;
+  // Meridian-OP: active endpoint from the RPC health monitor (primary / fallback).
+  return rpcConnection("confirmed");
 }
 
 function getWallet() {

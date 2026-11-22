@@ -10,6 +10,7 @@ import { config } from "../config.js";
 import { log } from "../logger.js";
 import { getTrackedPosition } from "../state.js";
 import { recordTick, assessDump, fetchPoolCandles, pruneHistory } from "./dump-detector.js";
+import { getWalletExitState } from "./wallet-exit-watch.js";
 
 const round2 = v => Math.round(v * 100) / 100;
 const lastDumpState = new Map(); // position -> boolean (log hanya saat berubah)
@@ -44,6 +45,9 @@ export async function annotatePositions(positions, { binStepFor = null, getCandl
         p.reshape_count = lineage.reshape_count ?? 0;
       }
       p.oor_side = oorSide(p);
+      const walletExit = getWalletExitState(p.position);
+      p.wallet_exit_signal = walletExit?.exitSignal === true;
+      p.wallet_exit_reason = walletExit?.reason ?? null;
       recordTick(p.position, p, now);
       let binStep = tracked?.bin_step ?? null;
       if (binStep == null && typeof binStepFor === "function") binStep = await binStepFor(p.pool).catch(() => null);

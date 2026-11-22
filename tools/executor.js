@@ -9,13 +9,14 @@ import {
   closePosition,
   searchPools,
   reshapePosition,
+  withdrawLiquidity,
 } from "./dlmm.js";
 import { withWalletLock } from "../standalone/transactions.js";
 import { invalidateBalances } from "../standalone/balances.js";
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction, addPendingSwap, clearPendingSwap, getPendingSwaps, setPositionRegimeFlag } from "../state.js";
+import { setPositionInstruction, addPendingSwap, clearPendingSwap, getPendingSwaps, setPositionRegimeFlag, getTrackedPosition, setPartialTpState } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -43,9 +44,10 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
-import { notifyDeploy, notifyClose, notifySwap, notifyReshape, notifyAlert } from "../telegram.js";
+import { notifyDeploy, notifyClose, notifySwap, notifyReshape, notifyAlert, notifyPartialTp } from "../telegram.js";
 import { evaluatePortfolio, getDeployBlock, isPortfolioStateStale } from "../modules/portfolio-runner.js";
 import { regimeDeployGate } from "../modules/regime-runner.js";
+import { isRpcSafeMode } from "../modules/rpc-health.js";
 
 /** Telegram sink for portfolio-guard alerts (daily loss / kill switch). */
 export function portfolioNotify(kind, text) {
@@ -255,7 +257,27 @@ function normalizeConfigValue(key, value) {
 }
 
 // Map tool names to implementations
+/**
+ * Meridian-OP partial take profit: withdraw `bps` of the remaining liquidity (fees claimed),
+ * then record progress. `fraction` is the share of the ORIGINAL size this step takes.
+ */
+async function partialClosePosition({ position_address, bps, fraction, stage, reason }) {
+  const res = await withdrawLiquidity({ position_address, bps, claim_fees: true });
+  if (res?.success || res?.dry_run) {
+    const prev = getTrackedPosition(position_address)?.partial_tp || {};
+    const done = String(stage || "");
+    setPartialTpState(position_address, {
+      tp1_done: prev.tp1_done || done.includes("tp1"),
+      tp2_done: prev.tp2_done || done.includes("tp2"),
+      withdrawn_fraction: Math.min(0.99, (Number(prev.withdrawn_fraction) || 0) + (Number(fraction) || 0)),
+      history: [...(prev.history || []), { stage: done, bps, fraction, at: new Date().toISOString(), reason: String(reason || "").slice(0, 160), dry_run: !!res.dry_run }],
+    });
+  }
+  return { ...res, stage, fraction, position: position_address };
+}
+
 const toolMap = {
+  partial_close_position: partialClosePosition,
   discover_pools: discoverPools,
   get_top_candidates: getTopCandidates,
   get_pool_detail: getPoolDetail,
@@ -439,6 +461,22 @@ const toolMap = {
       portfolioDayUtcOffsetHours: ["management", "portfolioDayUtcOffsetHours"],
       portfolioGuardCheckSec: ["management", "portfolioGuardCheckSec"],
       killSwitchPauseHours: ["management", "killSwitchPauseHours"],
+      partialTpEnabled: ["management", "partialTpEnabled"],
+      partialTp1Pct: ["management", "partialTp1Pct"],
+      partialTp1Fraction: ["management", "partialTp1Fraction"],
+      partialTp2Pct: ["management", "partialTp2Pct"],
+      partialTp2Fraction: ["management", "partialTp2Fraction"],
+      partialTpFinalPct: ["management", "partialTpFinalPct"],
+      walletExitWatchEnabled: ["management", "walletExitWatchEnabled"],
+      walletExitAction: ["management", "walletExitAction"],
+      walletExitMinWallets: ["management", "walletExitMinWallets"],
+      walletExitShareDropPct: ["management", "walletExitShareDropPct"],
+      walletExitCheckSec: ["management", "walletExitCheckSec"],
+      rpcHealthCheckSec: ["management", "rpcHealthCheckSec"],
+      rpcFailoverAfterFailures: ["management", "rpcFailoverAfterFailures"],
+      rpcFailbackAfterOk: ["management", "rpcFailbackAfterOk"],
+      rpcSafeModeSec: ["management", "rpcSafeModeSec"],
+      rpcProbeTimeoutMs: ["management", "rpcProbeTimeoutMs"],
       regimeGateMode: ["management", "regimeGateMode"],
       regimeSol24hDropPct: ["management", "regimeSol24hDropPct"],
       regimeBtc1hDropPct: ["management", "regimeBtc1hDropPct"],
@@ -641,6 +679,7 @@ const WRITE_TOOLS = new Set([
   "close_position",
   "swap_token",
   "reshape_position",
+  "partial_close_position",
 ]);
 const PROTECTED_TOOLS = new Set([
   ...WRITE_TOOLS,
@@ -758,7 +797,7 @@ export async function executeTool(name, args = {}) {
   if (WRITE_TOOLS.has(name)) return withWalletLock(async () => {
     try { return await executeToolUnlocked(name, args); }
     finally { invalidateBalances(); }
-  }, name === "close_position" ? 10 : name === "reshape_position" ? 6 : name === "deploy_position" ? 0 : 5);
+  }, name === "close_position" ? 10 : name === "partial_close_position" ? 8 : name === "reshape_position" ? 6 : name === "deploy_position" ? 0 : 5);
   return executeToolUnlocked(name, args);
 }
 async function executeToolUnlocked(name, args) {
@@ -826,6 +865,11 @@ async function executeToolUnlocked(name, args) {
         }
       } else if (name === "reshape_position") {
         notifyReshape(result).catch(() => {});
+      } else if (name === "partial_close_position") {
+        let swapped = null;
+        if (!result.dry_run && result.base_mint) swapped = await swapBaseToSolWithRetry(result.base_mint, "after partial TP");
+        if (swapped?.result?.amount_out) result.sol_received = swapped.result.amount_out;
+        notifyPartialTp({ ...result, pool_name: getTrackedPosition(args.position_address)?.pool_name }).catch(() => {});
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         await swapBaseToSolWithRetry(result.base_mint, "after claim");
       }
@@ -1026,7 +1070,21 @@ async function runSafetyChecks(name, args) {
       return { pass: true };
     }
 
+    case "partial_close_position": {
+      if (config.management.partialTpEnabled !== true) return { pass: false, reason: "Partial TP is disabled (management.partialTpEnabled=false)." };
+      const bps = Number(args.bps);
+      if (!Number.isInteger(bps) || bps < 1 || bps > 9900) return { pass: false, reason: "bps must be an integer 1-9900 (use close_position for 100%)" };
+      const tracked = getTrackedPosition(args.position_address);
+      if (!tracked || tracked.closed) return { pass: false, reason: "Position is not tracked or already closed" };
+      const done = String(args.stage || "");
+      if ((done.includes("tp1") && tracked.partial_tp?.tp1_done) || (done === "tp2" && tracked.partial_tp?.tp2_done)) {
+        return { pass: false, reason: `Partial TP ${done} already taken for this position` };
+      }
+      return { pass: true };
+    }
+
     case "reshape_position": {
+      if (isRpcSafeMode()) return { pass: false, reason: "RPC safe mode — all endpoints down, no reshape" };
       if (config.management.reshapeEnabled !== true) {
         return { pass: false, reason: "Reshape is disabled (management.reshapeEnabled=false)." };
       }

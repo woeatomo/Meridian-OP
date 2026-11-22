@@ -179,6 +179,25 @@ export const config = {
     portfolioDayUtcOffsetHours: u.portfolioDayUtcOffsetHours ?? 7, // hari trading = WIB
     portfolioGuardCheckSec: u.portfolioGuardCheckSec ?? 60,     // evaluasi dari poller maks tiap N detik
     killSwitchPauseHours:   u.killSwitchPauseHours   ?? 24,
+    // Meridian-OP: Partial TP (modules/partial-tp.js). Saat aktif, TP penuh pindah ke partialTpFinalPct.
+    partialTpEnabled:       u.partialTpEnabled       ?? false,
+    partialTp1Pct:          u.partialTp1Pct          ?? 5,
+    partialTp1Fraction:     u.partialTp1Fraction     ?? 0.5,
+    partialTp2Pct:          u.partialTp2Pct          ?? 10,
+    partialTp2Fraction:     u.partialTp2Fraction     ?? 0.25,
+    partialTpFinalPct:      u.partialTpFinalPct      ?? 20,
+    // Meridian-OP: Smart Wallet Exit Watch (modules/wallet-exit-watch.js) — standalone entries.
+    walletExitWatchEnabled: u.walletExitWatchEnabled ?? true,
+    walletExitAction:       u.walletExitAction       ?? "close", // "close" | "log"
+    walletExitMinWallets:   u.walletExitMinWallets   ?? 2,
+    walletExitShareDropPct: u.walletExitShareDropPct ?? 50,
+    walletExitCheckSec:     u.walletExitCheckSec     ?? 60,
+    // Meridian-OP: RPC failover (modules/rpc-health.js). Cadangan = FALLBACK_RPC_URL / fallbackRpcUrl.
+    rpcHealthCheckSec:        u.rpcHealthCheckSec        ?? 15,
+    rpcFailoverAfterFailures: u.rpcFailoverAfterFailures ?? 2,
+    rpcFailbackAfterOk:       u.rpcFailbackAfterOk       ?? 3,
+    rpcSafeModeSec:           u.rpcSafeModeSec           ?? 60,
+    rpcProbeTimeoutMs:        u.rpcProbeTimeoutMs        ?? 8000,
     // Meridian-OP: Regime gate (modules/regime-runner.js) — "off" | "log" | "enforce".
     regimeGateMode:         u.regimeGateMode         ?? "log",
     regimeSol24hDropPct:    u.regimeSol24hDropPct    ?? -10,

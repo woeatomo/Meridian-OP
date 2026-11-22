@@ -225,6 +225,44 @@ export function setPositionLineage(position_address, lineage, carry = {}) {
   return true;
 }
 
+/** Meridian-OP partial TP progress: { tp1_done, tp2_done, withdrawn_fraction, history[] }. */
+export function setPartialTpState(position_address, patch) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || !patch) return null;
+  const prev = pos.partial_tp || { tp1_done: false, tp2_done: false, withdrawn_fraction: 0, history: [] };
+  pos.partial_tp = {
+    tp1_done: patch.tp1_done ?? prev.tp1_done,
+    tp2_done: patch.tp2_done ?? prev.tp2_done,
+    withdrawn_fraction: Number.isFinite(Number(patch.withdrawn_fraction)) ? Number(patch.withdrawn_fraction) : prev.withdrawn_fraction,
+    history: Array.isArray(patch.history) ? patch.history.slice(-10) : prev.history,
+  };
+  save(state);
+  return pos.partial_tp;
+}
+
+/**
+ * Meridian-OP Smart Wallet Exit Watch: the trigger wallets (and THEIR DLMM positions)
+ * whose convergence caused this entry. Values are base58 addresses / numeric strings.
+ */
+export function setTriggerWallets(position_address, triggers) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || !Array.isArray(triggers) || !triggers.length) return false;
+  const addr = (v) => (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(v || "")) ? String(v) : null);
+  pos.trigger_wallets = triggers
+    .map((t) => ({
+      wallet: addr(t.wallet),
+      position: addr(t.position),
+      pool: addr(t.pool),
+      shares: /^\d+$/.test(String(t.shares ?? "")) ? String(t.shares) : null,
+    }))
+    .filter((t) => t.wallet && t.position && t.pool && t.shares)
+    .slice(0, 10);
+  save(state);
+  return pos.trigger_wallets.length > 0;
+}
+
 /** Meridian-OP regime gate (log-only): remember that a position was opened in a "bad" regime. */
 export function setPositionRegimeFlag(position_address, flag) {
   const state = load();

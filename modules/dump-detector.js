@@ -13,9 +13,51 @@
 // Riwayat juga dipakai reshape-manager: kecepatan turun (bin / 10 mnt) dan
 // "low" 10 menit terakhir untuk mencegah reshape saat harga sedang rebound.
 
+import fs from "node:fs";
+
 const SAMPLE_EVERY_MS = 10_000;      // simpan maks 1 sampel / 10 detik per posisi
 const KEEP_MS = 45 * 60_000;         // simpan 45 menit riwayat
 const history = new Map();           // position -> [{ ts, bin, pnl }]
+
+// ─── Persistence (Meridian-OP): survive restarts ───────────────────────────
+// Enabled only by the runtimes (enableHistoryPersistence) so tests never touch disk.
+// Saved at most every SAVE_EVERY_MS, atomically (tmp + rename); samples older than
+// KEEP_MS are dropped on load, so a long downtime simply starts fresh.
+const SAVE_EVERY_MS = 30_000;
+let persistFile = null;
+let lastSavedAt = 0;
+let dirty = false;
+
+export function enableHistoryPersistence(file, now = Date.now()) {
+  persistFile = file;
+  try {
+    if (!fs.existsSync(file)) return 0;
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    let n = 0;
+    for (const [position, list] of Object.entries(raw?.history || {})) {
+      if (!Array.isArray(list)) continue;
+      const kept = list
+        .filter((s) => Number.isFinite(s?.ts) && Number.isFinite(s?.bin) && now - s.ts <= KEEP_MS && s.ts <= now)
+        .map((s) => ({ ts: s.ts, bin: s.bin, pnl: Number.isFinite(s.pnl) ? s.pnl : null, ...(Number.isFinite(s.maxBin) ? { maxBin: s.maxBin } : {}) }));
+      if (kept.length) { history.set(position, kept); n += kept.length; }
+    }
+    return n;
+  } catch {
+    return 0; // corrupt file: start fresh, it is only a cache
+  }
+}
+
+export function flushHistory(now = Date.now(), force = false) {
+  if (!persistFile || (!dirty && !force)) return;
+  if (!force && now - lastSavedAt < SAVE_EVERY_MS) return;
+  try {
+    const tmp = `${persistFile}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ saved_at: now, history: Object.fromEntries(history) }));
+    fs.renameSync(tmp, persistFile);
+    lastSavedAt = now;
+    dirty = false;
+  } catch { /* best-effort cache */ }
+}
 
 export function recordTick(position, { active_bin, pnl_pct }, now = Date.now()) {
   if (!position || active_bin == null || !Number.isFinite(Number(active_bin))) return;
@@ -31,6 +73,8 @@ export function recordTick(position, { active_bin, pnl_pct }, now = Date.now()) 
   }
   while (list.length && now - list[0].ts > KEEP_MS) list.shift();
   history.set(position, list);
+  dirty = true;
+  flushHistory(now);
 }
 
 export function forgetPosition(position) {
@@ -40,7 +84,7 @@ export function forgetPosition(position) {
 /** Drop history for positions no longer open. */
 export function pruneHistory(openPositions) {
   const keep = new Set(openPositions);
-  for (const key of history.keys()) if (!keep.has(key)) history.delete(key);
+  for (const key of history.keys()) if (!keep.has(key)) { history.delete(key); dirty = true; }
 }
 
 export function getHistory(position) {

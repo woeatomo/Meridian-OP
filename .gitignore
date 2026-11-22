@@ -52,3 +52,5 @@ discord-signals.json
 wallet-monitor-state.json
 wallet-monitor-state.json.tmp
 standalone.lock
+dump-history.json
+dump-history.json.tmp

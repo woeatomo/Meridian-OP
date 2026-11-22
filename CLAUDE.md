@@ -418,6 +418,15 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
 - **Regime gate** (`modules/regime-runner.js`): `regimeDeployGate()` in `runSafetyChecks(deploy_position)`; mode
   `regimeGateMode` = off | log (default, flags `state.positions[addr].regime_flag` + decision-log `regime_flag`) |
   enforce. Acute rules only by default; fail-open on missing market data. `cli.js regime` reports flagged vs normal.
+- **Smart Wallet Exit Watch** (`modules/wallet-exit-watch.js`): standalone stores `trigger_wallets` (their position +
+  shares) on the tracked position at entry; `refreshWalletExits` (throttled) feeds `wallet_exit_signal` into
+  annotate → exit Rule 6. Reshape copies `trigger_wallets` and `partial_tp` to the new position.
+- **Partial TP**: `partial_close_position` tool (WRITE, lock priority 8) → `withdrawLiquidity(bps)` + guarded swap;
+  progress in `state.positions[addr].partial_tp`. Pollers emit `PARTIAL_TP*` through `registerExitSignal`.
+  When `partialTpEnabled`, exit Rule 2 uses `partialTpFinalPct` instead of `takeProfitPct`.
+- **RPC failover** (`modules/rpc-health.js`): `rpcConnection()` replaces the old single-URL `getConnection()` in
+  dlmm/wallet/pnl. Safe mode (`isRpcSafeMode`) blocks deploy (via `getDeployBlock`) and reshape.
+- **Dump history persistence**: `enableHistoryPersistence(repoPath("dump-history.json"))` in both runtimes' start.
 - Tests: `npm run test:op` (pure, no network).
 
 ## Known issues / tech debt (verified by reading the code)

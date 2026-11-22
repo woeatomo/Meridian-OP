@@ -16,6 +16,10 @@ pernah dipanggil).
 | 6 | Alert Telegram untuk Emergency SL dan reshape. CLI `withdraw-liquidity` / `add-liquidity` yang dulu rusak (fungsi tidak di-export) sekarang jalan; tambah CLI `reshape`. | `telegram.js`, `cli.js` |
 | 7 | **Daily loss limit + kill switch** — ekuitas (wallet + posisi, default dalam SOL) dicek tiap siklus manajemen dan tiap 60 dtk dari poller. Rugi harian ≤ `dailyLossLimitPct` (−5%) dari awal hari WIB → stop deploy sampai besok. Drawdown ≤ `portfolioKillSwitchPct` (−10%) dari peak → tutup semua posisi + pause entry `killSwitchPauseHours` (24 jam). Data ekuitas tidak lengkap → hanya blok deploy, tidak pernah menutup posisi. | `modules/portfolio-runner.js`, `modules/portfolio-guard.js`, `tools/executor.js` (gate deploy) |
 | 8 | **Regime gate (mode log-only)** — tiap deploy cek SOL 24 jam ≤ `regimeSol24hDropPct` (−10%) atau BTC 1 jam ≤ `regimeBtc1hDropPct` (−5%) (CoinGecko, cadangan Binance). Mode `log` (default): deploy tetap jalan, tapi dicatat di decision-log + ditandai di posisi; `node cli.js regime` membandingkan hasil deploy "seharusnya diblokir" vs normal. Ganti ke `enforce` hanya bila datanya jelas buruk (20+ sampel). Data market gagal = tidak memblokir. Aturan tren EMA200 mati default (`regimeUseTrendRule`). | `modules/regime-gate.js`, `modules/regime-runner.js` |
+| 9 | **Smart Wallet Exit Watch** (standalone) — wallet pemicu entry + posisi DLMM mereka dicatat di posisi kita. Tiap `walletExitCheckSec` (60 dtk) dicek: posisi mereka ditutup (dan tidak pindah ke posisi baru di pool yang sama) atau likuiditas turun ≥ `walletExitShareDropPct` (50%) = keluar. ≥ `walletExitMinWallets` (2) keluar → Rule 6 menutup posisi (`walletExitAction: "log"` = hanya catat). Gagal baca = tidak dihitung. | `modules/wallet-exit-watch.js`, `exit-rules.js` Rule 6 |
+| 10 | **Partial TP** (`partialTpEnabled`) — +5% tarik 50% ukuran awal, +10% tarik 25% lagi (fee diklaim, token dijual ke SOL lewat swap guard); sisanya jalan dengan trailing / SL. TP penuh pindah ke `partialTpFinalPct` (+20%). Dikonfirmasi 2 tick seperti exit; gagal = jeda 5 mnt. PnL tetap kontinu (Meteora menghitung withdrawal). | `modules/partial-tp.js`, `modules/partial-tp-runner.js`, tool `partial_close_position` |
+| 11 | **Riwayat detektor dump tersimpan** di `dump-history.json` (tiap 30 dtk + saat shutdown); dipulihkan saat start (data > 45 mnt dibuang). Restart tidak lagi membuat bot "buta" dump. | `modules/dump-detector.js` |
+| 12 | **RPC failover** — kirim tx, baca pool, saldo, PnL RPC memakai endpoint aktif dari monitor (probe tiap 15 dtk). Primary gagal 2x → pindah ke `FALLBACK_RPC_URL`; kembali setelah primary sehat 3x. Semua mati > 60 dtk → **safe mode**: deploy & reshape diblokir, close tetap dicoba. Alert Telegram RPC_FAILOVER / RPC_DOWN / RPC_RECOVERED. | `modules/rpc-health.js` |
 
 ### Reshape (Spot → Bid-Ask, satu arah ke bawah)
 
@@ -45,8 +49,9 @@ Lessons / pool-memory mencatat satu trade per lineage (modal awal + total durasi
 ### Belum dikerjakan (sengaja)
 - **Reshape parsial dulu** (spec: "partial dulu") — butuh dua posisi per pool sementara, sedangkan
   safety check masih 1 posisi/pool. Ditunda sampai ada data shadow.
-- Partial TP, fee harvest, sizing, wallet score, health: modulnya masih fungsi murni
-  yang belum disambungkan ke runtime.
+- Fee harvest, sizing, wallet score: modulnya masih fungsi murni yang belum disambungkan ke runtime.
+- Smart Wallet Exit Watch hanya untuk mode standalone (mode legacy tidak mencatat wallet pemicu).
+- Set `FALLBACK_RPC_URL` di `.env` (RPC provider lain dari primary) agar failover berguna.
 - Format respons OHLCV Meteora belum diverifikasi dari container build; parser dibuat defensif.
   Bila fetch gagal, sinyal candle dianggap tidak aktif (dump butuh harga + bin).
 

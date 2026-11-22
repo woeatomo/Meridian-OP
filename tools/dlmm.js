@@ -23,6 +23,8 @@ import {
   minutesOutOfRange,
   syncOpenPositions,
   setPositionLineage,
+  setTriggerWallets,
+  setPartialTpState,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
@@ -32,6 +34,7 @@ import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } fro
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
 import { annotatePositions } from "../modules/position-annotate.js";
+import { rpcConnection } from "../modules/rpc-health.js";
 import { planReshapeRange, nextPnlFactor } from "../modules/reshape-manager.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
@@ -84,10 +87,8 @@ let _connection = null;
 let _wallet = null;
 
 function getConnection() {
-  if (!_connection) {
-    _connection = new Connection(process.env.RPC_URL, "confirmed");
-  }
-  return _connection;
+  // Meridian-OP: active endpoint from the RPC health monitor (primary / fallback).
+  return rpcConnection("confirmed");
 }
 
 function getWallet() {
@@ -2369,6 +2370,9 @@ export async function reshapePosition({ position_address, reason = "reshape", st
     last_reshape_at: new Date().toISOString(),
     last_reshape_bin: activeBinId,
   }, { peak_pnl_pct: tracked.peak_pnl_pct ?? 0, trailing_active: !!tracked.trailing_active });
+  // Exit watch / partial TP state follow the lineage.
+  if (tracked.trigger_wallets?.length) setTriggerWallets(newAddress, tracked.trigger_wallets);
+  if (tracked.partial_tp) setPartialTpState(newAddress, tracked.partial_tp);
 
   appendDecision({
     type: "reshape",

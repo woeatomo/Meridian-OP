@@ -18,6 +18,7 @@ import { config } from "../config.js";
 import { log } from "../logger.js";
 import { getPortfolioState, savePortfolioState } from "../state.js";
 import { portfolioGuard } from "./portfolio-guard.js";
+import { isRpcSafeMode } from "./rpc-health.js";
 
 const STALE_MS = 15 * 60_000;
 let lastEvalAt = 0;
@@ -59,6 +60,7 @@ export function computeEquity(balances, positions, unit = "sol") {
 /** Status blokir deploy dari state terakhir (tanpa I/O jaringan). */
 export function getDeployBlock(now = Date.now()) {
   const cfg = config.management;
+  if (isRpcSafeMode()) return "RPC safe mode — all RPC endpoints down";
   if (cfg.portfolioGuardEnabled === false) return null;
   const st = getPortfolioState();
   if (st.kill_switch_until && now < new Date(st.kill_switch_until).getTime()) {

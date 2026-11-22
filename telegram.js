@@ -547,3 +547,11 @@ export async function notifyAlert(kind, text) {
 function escapeHtml(text) {
   return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+
+export async function notifyPartialTp({ pool_name, position, stage, fraction, dry_run }) {
+  const pair = pool_name || position?.slice(0, 8) || "position";
+  await sendHTML(
+    `💰 <b>Partial TP ${escapeHtml(String(stage || "").toUpperCase())}</b> ${escapeHtml(pair)}${dry_run ? " (dry run)" : ""}\n` +
+    `Withdrew ${Math.round((Number(fraction) || 0) * 100)}% of original size; remainder keeps running on trailing / SL.`
+  );
+}
