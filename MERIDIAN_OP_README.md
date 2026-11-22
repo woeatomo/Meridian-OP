@@ -57,6 +57,83 @@ Lessons / pool-memory mencatat satu trade per lineage (modal awal + total durasi
 - Format respons OHLCV Meteora belum diverifikasi dari container build; parser dibuat defensif.
   Bila fetch gagal, sinyal candle dianggap tidak aktif (dump butuh harga + bin).
 
+## Setup VPS baru (Ubuntu 22.04 / 24.04)
+
+1. **Paket dasar + Node 22 + PM2** (sebagai user biasa dengan sudo, bukan root):
+
+```bash
+sudo apt update && sudo apt install -y git curl build-essential
+```
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs
+```
+
+```bash
+sudo npm install -g pm2
+```
+
+2. **Clone + branch `op-v2`** (repo private: pakai deploy key / token GitHub di VPS):
+
+```bash
+git clone https://github.com/woeatomo/Meridian-OP.git ~/Meridian-OP && cd ~/Meridian-OP && git checkout op-v2
+```
+
+```bash
+npm install
+```
+
+3. **Buat semua file config** (`user-config.json`, `rpc-endpoints.json`, `smart-wallets.json`;
+   shadow mode ON, tanpa key RPC lama):
+
+```bash
+npm run init:op
+```
+
+4. **`.env`** — hanya rahasia non-RPC: `WALLET_PRIVATE_KEY`, `OPENROUTER_API_KEY`,
+   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. Pakai wallet khusus bot, bukan wallet utama.
+
+```bash
+nano .env && chmod 600 .env
+```
+
+5. **RPC** — isi `apiKey` di `rpc-endpoints.json`, lalu cek:
+
+```bash
+nano rpc-endpoints.json && node cli.js rpc
+```
+
+6. **Smart wallet** (standalone butuh minimal 2):
+
+```bash
+node cli.js wallets add --address <ALAMAT_WALLET> --name <NAMA>
+```
+
+7. **Cek + baseline portfolio guard**:
+
+```bash
+npm run test:op && node cli.js balance && node cli.js guard --reset
+```
+
+8. **Jalankan (shadow mode)** + auto-start saat VPS reboot:
+
+```bash
+npm run pm2:start && pm2 save && pm2 startup
+```
+
+```bash
+pm2 logs meridian --lines 100
+```
+
+9. **Live** — setelah shadow berjalan baik: set `"shadowMode": false` di `user-config.json`, lalu:
+
+```bash
+node cli.js guard --reset && npm run pm2:restart
+```
+
+Keamanan: bot tidak butuh port masuk — cukup buka SSH (`sudo ufw allow OpenSSH && sudo ufw enable`).
+Jangan pernah membagikan `.env`, `rpc-endpoints.json`, atau `user-config.json`.
+
 ## Setting RPC + API key (satu tempat: `rpc-endpoints.json`)
 
 Semua RPC **dan API key-nya** diatur di **`rpc-endpoints.json`** saja. `RPC_URL` / `HELIUS_API_KEY`

@@ -243,6 +243,10 @@ const { values: flags } = parseArgs({
     wallet:     { type: "string" },
     timeframe:  { type: "string" },
     reason:     { type: "string" },
+    address:    { type: "string" },
+    name:       { type: "string" },
+    category:   { type: "string" },
+    type:       { type: "string" },
     "bins-below": { type: "string" },
     "bins-above": { type: "string" },
     "amount-x":   { type: "string" },
@@ -652,6 +656,22 @@ switch (subcommand) {
       bps: flags.bps ? parseInt(flags.bps) : 10000,
       claim_fees: !argv.includes("--no-claim"),
     }));
+    break;
+  }
+
+  // ── wallets (smart wallets for the standalone entry signal) ────
+  case "wallets": {
+    const { listSmartWallets, addSmartWallet, removeSmartWallet } = await import("./smart-wallets.js");
+    const action = argv.find((a, i) => i > 0 && !a.startsWith("-") && a !== "wallets") || "list";
+    if (action === "add") {
+      if (!flags.address) die("Usage: meridian wallets add --address <ADDR> --name <NAME> [--type lp|holder] [--category alpha]");
+      out(addSmartWallet({ address: flags.address, name: flags.name || flags.address.slice(0, 6), category: flags.category || "alpha", type: flags.type || "lp" }));
+    } else if (action === "remove") {
+      if (!flags.address) die("Usage: meridian wallets remove --address <ADDR>");
+      out(removeSmartWallet({ address: flags.address }));
+    } else {
+      out(listSmartWallets());
+    }
     break;
   }
 
