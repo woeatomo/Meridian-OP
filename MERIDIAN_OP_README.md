@@ -178,8 +178,11 @@ git clone -b op-v2 https://github.com/woeatomo/Meridian-OP.git ~/Meridian-OP
 cd ~/Meridian-OP && npm install && npm run test:op
 ```
 
-1. `.env` — minimal `WALLET_PRIVATE_KEY`, `OPENROUTER_API_KEY` (atau `LLM_API_KEY`), opsional
-   `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`. **Tanpa** `RPC_URL` / `HELIUS_API_KEY`. `chmod 600 .env`.
+1. `.env` — salin dulu dari contoh: `cp .env.example .env && chmod 600 .env`, lalu edit.
+   Isi minimal `WALLET_PRIVATE_KEY`, `OPENROUTER_API_KEY` (atau `LLM_API_KEY`), opsional
+   `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`. **Hapus atau kosongkan** baris `RPC_URL`,
+   `HELIUS_API_KEY`, `FALLBACK_RPC_URL`, `MONITOR_RPC_URL`, `BALANCE_RPC_URL`, `PNL_RPC_URL` kalau ada —
+   nilai contoh/placeholder di sana akan mengalahkan `rpc-endpoints.json`.
 2. `cp rpc-endpoints.example.json rpc-endpoints.json && chmod 600 rpc-endpoints.json`, isi `apiKey`.
 3. `npm run init:config` — membuat `user-config.json` (template + Meridian-OP, shadowMode on, tanpa key RPC).
 4. Smart wallet yang dipantau (minimal `walletThreshold`, default 2):
