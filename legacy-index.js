@@ -12,6 +12,8 @@ import { config, reloadScreeningThresholds, computeDeployAmount } from "./config
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepPendingSwaps, portfolioNotify } from "./tools/executor.js";
 import { evaluatePortfolio, getDeployBlock, formatGuardStatus, resetGuardNow } from "./modules/portfolio-runner.js";
+import { getRegimeMetrics, formatRegimeReport } from "./modules/regime-runner.js";
+import { regimeGate } from "./modules/regime-gate.js";
 import { maybeReshape } from "./modules/reshape-runner.js";
 import {
   startPolling,
@@ -1283,6 +1285,7 @@ function formatHelpText() {
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
     "/guard — portfolio guard status (daily loss / kill switch)",
+    "/regime — regime gate status + would-block vs normal deploy results",
     "/guard reset — re-baseline equity after a manual deposit/withdraw",
     "/guard reset kill — also clear an active kill switch",
     "/hive — HiveMind sync status",
@@ -1410,6 +1413,17 @@ async function telegramHandler(msg) {
       sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
     } else {
       sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/regime") {
+    try {
+      const m = await getRegimeMetrics({ force: true });
+      const g = regimeGate(m, config.management);
+      await sendMessage(`Now: ${g.allow ? "OK" : "WOULD BLOCK"} — ${g.reason}\n${formatRegimeReport()}`);
+    } catch (e) {
+      await sendMessage(`Regime error: ${e.message}`).catch(() => {});
     }
     return;
   }

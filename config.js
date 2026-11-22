@@ -179,6 +179,12 @@ export const config = {
     portfolioDayUtcOffsetHours: u.portfolioDayUtcOffsetHours ?? 7, // hari trading = WIB
     portfolioGuardCheckSec: u.portfolioGuardCheckSec ?? 60,     // evaluasi dari poller maks tiap N detik
     killSwitchPauseHours:   u.killSwitchPauseHours   ?? 24,
+    // Meridian-OP: Regime gate (modules/regime-runner.js) — "off" | "log" | "enforce".
+    regimeGateMode:         u.regimeGateMode         ?? "log",
+    regimeSol24hDropPct:    u.regimeSol24hDropPct    ?? -10,
+    regimeBtc1hDropPct:     u.regimeBtc1hDropPct     ?? -5,
+    regimeUseTrendRule:     u.regimeUseTrendRule     ?? false, // EMA200 trend rule (bisa blok berminggu-minggu)
+    regimeCheckSec:         u.regimeCheckSec         ?? 300,   // cache data market
     maxHoldMinutes:         u.maxHoldMinutes         ?? 2880,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close

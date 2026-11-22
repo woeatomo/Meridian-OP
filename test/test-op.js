@@ -163,5 +163,24 @@ console.log("\n[6] portfolio guard (daily loss + kill switch)");
   check("trading day uses WIB offset", tradingDay(Date.UTC(2026, 10, 22, 18, 0), 7) === "2026-11-23" && tradingDay(Date.UTC(2026, 10, 22, 16, 0), 7) === "2026-11-22");
 }
 
+console.log("\n[7] regime gate (acute rules, fail-open)");
+{
+  const { regimeGate } = await import("../modules/regime-gate.js");
+  const { parseCoinGeckoMarkets, parseBinance } = await import("../modules/regime-runner.js");
+  check("calm market → allow", regimeGate({ solChange24hPct: -3, btcChange1hPct: -1 }, cfg).allow);
+  check("SOL -10%/24h → would block", !regimeGate({ solChange24hPct: -10.5, btcChange1hPct: 0 }, cfg).allow);
+  check("BTC -5%/1h → would block", !regimeGate({ solChange24hPct: 0, btcChange1hPct: -5.2 }, cfg).allow);
+  check("missing data → allow (fail-open)", regimeGate({}, cfg).allow && !regimeGate({}, cfg).complete);
+  check("trend rule off by default", regimeGate({ solChange24hPct: 0, btcChange1hPct: 0, solClose: 90, solEma50: 95, solEma200: 100 }, cfg).allow);
+  check("trend rule when enabled", !regimeGate({ solChange24hPct: 0, btcChange1hPct: 0, solClose: 90, solEma50: 95, solEma200: 100 }, { ...cfg, regimeUseTrendRule: true }).allow);
+  const cg = parseCoinGeckoMarkets([
+    { id: "bitcoin", current_price: 90000, price_change_percentage_1h_in_currency: -0.4 },
+    { id: "solana", current_price: 150, price_change_percentage_24h_in_currency: -2.1 },
+  ]);
+  check("parse CoinGecko markets", cg.btcChange1hPct === -0.4 && cg.solChange24hPct === -2.1 && cg.solPrice === 150);
+  const bn = parseBinance({ priceChangePercent: "-11.2", lastPrice: "140" }, [[0, "100", 0, 0, "100"], [0, "100", 0, 0, "94"]]);
+  check("parse Binance fallback", bn.solChange24hPct === -11.2 && Math.abs(bn.btcChange1hPct + 6) < 1e-9);
+}
+
 console.log(failed === 0 ? "\nALL TESTS PASSED" : `\n${failed} TEST(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

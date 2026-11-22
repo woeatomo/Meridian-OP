@@ -655,6 +655,18 @@ switch (subcommand) {
     break;
   }
 
+  // ── regime (Meridian-OP regime gate report) ───────────────────
+  case "regime": {
+    const { getRegimeMetrics, formatRegimeReport } = await import("./modules/regime-runner.js");
+    const { regimeGate } = await import("./modules/regime-gate.js");
+    const { config } = await import("./config.js");
+    const m = await getRegimeMetrics({ force: true });
+    const g = regimeGate(m, config.management);
+    console.log(`Now: ${g.allow ? "OK" : "WOULD BLOCK"} — ${g.reason}`);
+    console.log(formatRegimeReport());
+    break;
+  }
+
   // ── guard (Meridian-OP portfolio guard) ───────────────────────
   case "guard": {
     const { formatGuardStatus, resetGuardNow } = await import("./modules/portfolio-runner.js");

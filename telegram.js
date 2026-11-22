@@ -428,6 +428,7 @@ const BOT_COMMANDS = [
   { command: "pause",      description: "Stop cron cycles" },
   { command: "resume",     description: "Start cron cycles again" },
   { command: "guard",      description: "Portfolio guard status / reset" },
+  { command: "regime",     description: "Regime gate status + report" },
   { command: "stop",       description: "Shut down agent" },
 ];
 

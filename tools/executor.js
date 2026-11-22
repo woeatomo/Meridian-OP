@@ -15,7 +15,7 @@ import { invalidateBalances } from "../standalone/balances.js";
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction, addPendingSwap, clearPendingSwap, getPendingSwaps } from "../state.js";
+import { setPositionInstruction, addPendingSwap, clearPendingSwap, getPendingSwaps, setPositionRegimeFlag } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -45,6 +45,7 @@ const TIMEFRAME_MINUTES = {
 import { log, logAction } from "../logger.js";
 import { notifyDeploy, notifyClose, notifySwap, notifyReshape, notifyAlert } from "../telegram.js";
 import { evaluatePortfolio, getDeployBlock, isPortfolioStateStale } from "../modules/portfolio-runner.js";
+import { regimeDeployGate } from "../modules/regime-runner.js";
 
 /** Telegram sink for portfolio-guard alerts (daily loss / kill switch). */
 export function portfolioNotify(kind, text) {
@@ -438,6 +439,11 @@ const toolMap = {
       portfolioDayUtcOffsetHours: ["management", "portfolioDayUtcOffsetHours"],
       portfolioGuardCheckSec: ["management", "portfolioGuardCheckSec"],
       killSwitchPauseHours: ["management", "killSwitchPauseHours"],
+      regimeGateMode: ["management", "regimeGateMode"],
+      regimeSol24hDropPct: ["management", "regimeSol24hDropPct"],
+      regimeBtc1hDropPct: ["management", "regimeBtc1hDropPct"],
+      regimeUseTrendRule: ["management", "regimeUseTrendRule"],
+      regimeCheckSec: ["management", "regimeCheckSec"],
       // pnl poller
       pnlConfirmTicks: ["pnl", "confirmTicks"],
       // opportunity poller (interval/enabled changes apply on next restart)
@@ -799,6 +805,7 @@ async function executeToolUnlocked(name, args) {
       if (name === "swap_token" && result.tx) {
         notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
+        if (args._regime_flag && result.position) setPositionRegimeFlag(result.position, args._regime_flag);
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
       } else if (name === "close_position") {
         notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
@@ -867,6 +874,13 @@ async function runSafetyChecks(name, args) {
         const decision = await evaluatePortfolio({ positions: fresh.positions, getWalletBalances, notify: portfolioNotify });
         if (decision && !decision.allowDeploy) return { pass: false, reason: `Portfolio guard: ${decision.reason}` };
       }
+      // Meridian-OP regime gate: "log" mode only flags the deploy; "enforce" blocks it.
+      const regime = await regimeDeployGate({ pool: args.pool_address, poolName: args.pool_name }).catch((e) => {
+        log("regime_warn", `Regime gate failed (allowing): ${e.message}`);
+        return null;
+      });
+      if (regime?.block) return { pass: false, reason: `Regime gate: ${regime.reason}` };
+      if (regime?.wouldBlock) args._regime_flag = regime.flag;
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;
       if (poolThresholds.entryMarketData) Object.assign(args, poolThresholds.entryMarketData);

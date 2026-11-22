@@ -225,6 +225,22 @@ export function setPositionLineage(position_address, lineage, carry = {}) {
   return true;
 }
 
+/** Meridian-OP regime gate (log-only): remember that a position was opened in a "bad" regime. */
+export function setPositionRegimeFlag(position_address, flag) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || !flag) return false;
+  pos.regime_flag = {
+    mode: flag.mode ?? "log",
+    reason: sanitizeStoredText(flag.reason, 200),
+    at: flag.at ?? new Date().toISOString(),
+    sol_24h: flag.sol_24h ?? null,
+    btc_1h: flag.btc_1h ?? null,
+  };
+  save(state);
+  return true;
+}
+
 // ─── Portfolio guard state (Meridian-OP daily loss + kill switch) ──
 // { day, day_start_equity, peak_equity, last_equity, last_at, unit,
 //   day_blocked, day_blocked_reason, kill_switch_until, kill_switch_reason, alerts: {key: iso} }
