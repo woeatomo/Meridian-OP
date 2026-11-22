@@ -288,6 +288,25 @@ console.log("\n[10] RPC failover + safe mode");
     { name: "missing", url: "env:NOT_SET" },
     { name: "badws", url: "https://x.example", ws: "https://not-ws" },
   ] }, { QN_URL: "https://qn.example/token/", QN_WS: "wss://qn.example/token/" });
+  const keyed = R.parseEndpointsFile({ endpoints: [
+    { name: "h1", provider: "helius", apiKey: "abc123" },
+    { name: "h2", provider: "Helius", apiKey: "env:H2_KEY" },
+    { name: "al", provider: "alchemy", apiKey: "alk" },
+    { name: "qn", url: "https://x.quiknode.pro/{apiKey}/", ws: "wss://x.quiknode.pro/{apiKey}/", apiKey: "tok" },
+    { name: "cu", url: "https://rpc.example.com/?a=1", apiKeyParam: "api-key", apiKey: "k k" },
+    { name: "nokey", provider: "helius" },
+    { name: "ov", provider: "helius", apiKey: "z", url: "https://custom.example/{apiKey}" },
+  ] }, { H2_KEY: "fromenv" });
+  const by = Object.fromEntries(keyed.map((e) => [e.name, e]));
+  check("provider helius + apiKey → url + ws built", by.h1?.url === "https://mainnet.helius-rpc.com/?api-key=abc123" && by.h1?.ws === "wss://mainnet.helius-rpc.com/?api-key=abc123");
+  check("apiKey from env: + provider case-insensitive", by.h2?.url === "https://mainnet.helius-rpc.com/?api-key=fromenv");
+  check("alchemy preset", by.al?.url === "https://solana-mainnet.g.alchemy.com/v2/alk" && by.al?.ws === "wss://solana-mainnet.g.alchemy.com/v2/alk");
+  check("{apiKey} placeholder in url + ws", by.qn?.url === "https://x.quiknode.pro/tok/" && by.qn?.ws === "wss://x.quiknode.pro/tok/");
+  check("apiKeyParam appends (encoded) query param", by.cu?.url === "https://rpc.example.com/?a=1&api-key=k+k");
+  check("missing apiKey → endpoint skipped", !by.nokey && keyed.length === 6);
+  check("explicit url overrides preset (no preset ws)", by.ov?.url === "https://custom.example/z" && by.ov?.ws === null);
+  const { heliusApiKeyFromFile } = await import("../modules/rpc-endpoints-file.js");
+  check("HELIUS_API_KEY derived from first helius entry", heliusApiKeyFromFile({ endpoints: [{ provider: "alchemy", apiKey: "a" }, { provider: "helius", apiKey: "env:HK" }] }, { HK: "hk1" }) === "hk1");
   check("env: references resolve, missing env skipped, ws validated", withEnv.length === 2 && withEnv[0].url === "https://qn.example/token/" && withEnv[0].ws === "wss://qn.example/token/" && withEnv[1].ws === null);
 
   // Wallet monitor websocket follows the failover.

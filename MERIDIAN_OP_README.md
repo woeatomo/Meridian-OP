@@ -57,22 +57,33 @@ Lessons / pool-memory mencatat satu trade per lineage (modal awal + total durasi
 - Format respons OHLCV Meteora belum diverifikasi dari container build; parser dibuat defensif.
   Bila fetch gagal, sinyal candle dianggap tidak aktif (dump butuh harga + bin).
 
-## Setting RPC (satu tempat: `rpc-endpoints.json`)
+## Setting RPC + API key (satu tempat: `rpc-endpoints.json`)
 
-Semua RPC diatur di **`rpc-endpoints.json`** saja. `RPC_URL` di `.env` dan `rpcUrl` di
-`user-config.json` **tidak perlu diisi** — kalau kosong, endpoint pertama di file dipakai sebagai
-RPC utama. (Kalau masih diisi, tetap jalan dan jadi prioritas pertama; sebaiknya hapus supaya
-tidak ada dua tempat.)
+Semua RPC **dan API key-nya** diatur di **`rpc-endpoints.json`** saja. `RPC_URL` / `HELIUS_API_KEY`
+di `.env` dan `rpcUrl` di `user-config.json` **tidak perlu diisi** — kalau kosong, endpoint pertama
+di file dipakai sebagai RPC utama. (Kalau masih diisi, `RPC_URL` tetap jadi prioritas pertama;
+sebaiknya hapus supaya tidak ada dua tempat.)
 
 ```bash
 cp rpc-endpoints.example.json rpc-endpoints.json && chmod 600 rpc-endpoints.json
 ```
 
-- Urutan = prioritas. Endpoint pertama = utama, sisanya cadangan.
-- `ws` (opsional) = alamat websocket provider; dipakai monitor smart wallet dan ikut pindah saat failover.
-- `"url": "env:NAMA_VAR"` = nilai diambil dari `.env` — API key bisa tetap di `.env` yang dienkripsi
-  (`npm run env:encrypt`), file JSON hanya berisi nama variabel.
-- File dibaca ulang otomatis saat diubah (tambah / hapus / ganti key tanpa restart).
+```json
+{ "endpoints": [
+  { "name": "helius",    "provider": "helius",  "apiKey": "KEY_HELIUS" },
+  { "name": "alchemy",   "provider": "alchemy", "apiKey": "KEY_ALCHEMY" },
+  { "name": "quicknode", "url": "https://xxx.solana-mainnet.quiknode.pro/{apiKey}/",
+                         "ws":  "wss://xxx.solana-mainnet.quiknode.pro/{apiKey}/", "apiKey": "TOKEN" }
+] }
+```
+
+- `provider` `helius` / `alchemy` + `apiKey` → URL dan websocket dibuat otomatis.
+- Provider lain: tulis `url` (dan `ws`) dengan `{apiKey}` di posisi key. Atau `apiKeyParam: "api-key"`
+  untuk menempelkan key sebagai query param ke `url` biasa.
+- `apiKey` boleh `"env:NAMA"` kalau mau key tetap di `.env` yang dienkripsi.
+- Entri tanpa key / URL tidak valid dilewati dan muncul di log (nama saja).
+- Urutan = prioritas. File dibaca ulang otomatis saat diubah (tanpa restart).
+- API key / URL **tidak pernah** ditulis ke log, Telegram, atau `node cli.js rpc` — hanya `name`.
 - Cek: `node cli.js rpc`.
 
 Opsional, hanya kalau perlu RPC terpisah: `MONITOR_RPC_URL` + `MONITOR_WS_URL` (monitor wallet

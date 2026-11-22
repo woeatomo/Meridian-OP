@@ -61,6 +61,7 @@ export { parseEndpointsFile };
 function readFileEndpoints() {
   const r = readEndpointsFile(ENDPOINTS_FILE);
   if (r.error) log("rpc_warn", `rpc-endpoints.json unreadable (${r.error}) — ignoring file`);
+  if (r.skipped?.length) log("rpc_warn", `rpc-endpoints.json: skipped ${r.skipped.join(", ")} (missing apiKey / env var, or invalid url)`);
   return r;
 }
 

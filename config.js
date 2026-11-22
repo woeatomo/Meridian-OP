@@ -51,6 +51,8 @@ if (u.telegramChatId) process.env.TELEGRAM_CHAT_ID ||= String(u.telegramChatId);
 {
   const rpcFile = readEndpointsFile(repoPath("rpc-endpoints.json"));
   if (rpcFile.error) console.warn(`[config] rpc-endpoints.json unreadable: ${rpcFile.error}`);
+  // Tools that still read HELIUS_API_KEY (e.g. the setup wizard) get the file's Helius key.
+  if (rpcFile.heliusApiKey && !process.env.HELIUS_API_KEY) process.env.HELIUS_API_KEY = rpcFile.heliusApiKey;
   const first = rpcFile.list[0];
   if (!process.env.RPC_URL && first) {
     process.env.RPC_URL = first.url;
