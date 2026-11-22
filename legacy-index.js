@@ -10,7 +10,8 @@ import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
-import { executeTool, registerCronRestarter } from "./tools/executor.js";
+import { executeTool, registerCronRestarter, sweepPendingSwaps } from "./tools/executor.js";
+import { maybeReshape } from "./modules/reshape-runner.js";
 import {
   startPolling,
   stopPolling,
@@ -23,6 +24,7 @@ import {
   notifyOutOfRange,
   isEnabled as telegramEnabled,
   createLiveMessage,
+  notifyAlert,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal } from "./state.js";
@@ -235,6 +237,11 @@ export async function runManagementCycle({ silent = false } = {}) {
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
+    // Meridian-OP: retry base tokens the swap guard left unsold (not ones still in a position).
+    if (livePositions && !livePositions.error) {
+      await sweepPendingSwaps({ openBaseMints: positions.map((p) => p.base_mint).filter(Boolean) })
+        .catch((e) => log("cron_warn", `Pending swap sweep failed: ${e.message}`));
+    }
 
     if (positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");
@@ -744,9 +751,19 @@ Summarize the current portfolio health, total fees earned, and performance of al
 
         // Require N consecutive confirming ticks before acting.
         const { fire } = registerExitSignal(p.position, signal, confirmTicks);
-        if (!signal || !fire) continue;
+        if (!signal) {
+          // Meridian-OP: no exit pending — slow downtrend may warrant a reshape.
+          _managementBusy = true;
+          let reshaped = null;
+          try { reshaped = await maybeReshape(p, { hasExitSignal: false, executeTool }); }
+          finally { _managementBusy = false; }
+          if (reshaped) break; // one action per tick
+          continue;
+        }
+        if (!fire) continue;
 
         log("state", `[PnL poll] ${signal} confirmed (${confirmTicks} ticks): ${p.pair} — ${reason} — closing directly`);
+        if (/emergency/i.test(reason || "")) notifyAlert("EMERGENCY_SL", `${p.pair}: ${reason} — PnL ${p.pnl_pct}% | signals ${JSON.stringify(p.dump_signals ?? {})}`).catch(() => {});
         // Hold the management lock so the cron cycle can't double-act on this position.
         _managementBusy = true;
         try {

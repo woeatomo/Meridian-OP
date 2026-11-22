@@ -517,3 +517,31 @@ function fmtPct(value) {
   const n = Number(value);
   return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
 }
+
+// ─── Meridian-OP alerts (modules/health.js ALERT_EVENTS) ───────────
+
+export async function notifyReshape({ pool_name, position, new_position, strategy, bins_above, bins_below, reshape_count, chained_pnl_pct, amount_sol, success = true, error, funds_in_wallet }) {
+  const pair = pool_name || position?.slice(0, 8) || "position";
+  if (!success) {
+    await sendHTML(
+      `⚠️ <b>Reshape FAILED</b> ${pair}\n` +
+      `${escapeHtml(error || "unknown error")}` +
+      (funds_in_wallet ? `\nFunds left in wallet — token swapped back to SOL by guard (or queued).` : "")
+    );
+    return;
+  }
+  await sendHTML(
+    `🔁 <b>Reshape #${reshape_count ?? "?"}</b> ${pair} → ${strategy}\n` +
+    `Token above: ${bins_above ?? 0} bins | SOL below: ${bins_below ?? 0} bins (${(amount_sol ?? 0).toFixed(3)} SOL)\n` +
+    `Chained PnL at reshape: ${chained_pnl_pct ?? "?"}%\n` +
+    `New position: <code>${new_position?.slice(0, 8)}...</code>`
+  );
+}
+
+export async function notifyAlert(kind, text) {
+  await sendHTML(`🚨 <b>${escapeHtml(kind)}</b>\n${escapeHtml(text)}`);
+}
+
+function escapeHtml(text) {
+  return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}

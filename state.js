@@ -197,6 +197,64 @@ export function recordClose(position_address, reason) {
 }
 
 /**
+ * Meridian-OP reshape lineage. Attach lineage to a freshly tracked position and carry
+ * over trailing-TP state (peak + trailing flag) from the position it replaced, so the
+ * chained PnL keeps its peak instead of re-arming from zero.
+ */
+export function setPositionLineage(position_address, lineage, carry = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+  pos.lineage = {
+    root_position: lineage.root_position ?? null,
+    previous_position: lineage.previous_position ?? null,
+    initial_value_usd: lineage.initial_value_usd ?? null,
+    started_at: lineage.started_at ?? pos.deployed_at,
+    pnl_factor: Number.isFinite(Number(lineage.pnl_factor)) ? Number(lineage.pnl_factor) : 1,
+    reshape_count: lineage.reshape_count ?? 1,
+    anchor_top_bin: lineage.anchor_top_bin ?? null,
+    last_reshape_at: lineage.last_reshape_at ?? new Date().toISOString(),
+    last_reshape_bin: lineage.last_reshape_bin ?? null,
+  };
+  pos.rebalance_count = pos.lineage.reshape_count;
+  if (carry.peak_pnl_pct != null) pos.peak_pnl_pct = carry.peak_pnl_pct;
+  if (carry.trailing_active != null) pos.trailing_active = !!carry.trailing_active;
+  pushEvent(state, { action: "reshape", position: position_address, pool_name: pos.pool_name || pos.pool, reason: `reshape #${pos.lineage.reshape_count}` });
+  save(state);
+  log("state", `Position ${position_address} lineage set: reshape #${pos.lineage.reshape_count}, pnl_factor ${pos.lineage.pnl_factor.toFixed(4)}`);
+  return true;
+}
+
+// ─── Pending swaps (Meridian-OP swap guard) ────────────────────
+// Base tokens left in the wallet because the swap guard blocked (price impact
+// too high) or Jupiter failed. The management cycle retries them.
+
+export function addPendingSwap(mint, reason) {
+  if (!mint) return;
+  const state = load();
+  state.pendingSwaps = state.pendingSwaps || {};
+  const prev = state.pendingSwaps[mint];
+  state.pendingSwaps[mint] = {
+    reason: sanitizeStoredText(reason, 120),
+    first_at: prev?.first_at || new Date().toISOString(),
+    last_at: new Date().toISOString(),
+    attempts: (prev?.attempts ?? 0) + 1,
+  };
+  save(state);
+}
+
+export function clearPendingSwap(mint) {
+  const state = load();
+  if (!state.pendingSwaps?.[mint]) return;
+  delete state.pendingSwaps[mint];
+  save(state);
+}
+
+export function getPendingSwaps() {
+  return load().pendingSwaps || {};
+}
+
+/**
  * Set a persistent instruction for a position (e.g. "hold until 5% profit").
  * Overwrites any previous instruction. Pass null to clear.
  */
@@ -408,7 +466,13 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Out of range too long ──────────────────────────────────────
-  if (pos.out_of_range_since) {
+  // Meridian-OP: hanya OOR KIRI (harga di bawah range = posisi penuh token) yang ditutup
+  // ketat setelah outOfRangeWaitMinutes. OOR KANAN (harga di atas range = posisi penuh SOL)
+  // diserahkan ke exit-rules Rule 3/4 (close bila PnL >= 0, HOLD bila minus sampai
+  // oorRightMaxWaitMinutes / oorRightMaxBinsAbove). Arah tak diketahui -> perilaku lama (ketat).
+  const { active_bin, upper_bin } = positionData;
+  const isOorRight = active_bin != null && upper_bin != null && active_bin > upper_bin;
+  if (pos.out_of_range_since && !isOorRight) {
     const minutesOOR = Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000);
     if (minutesOOR >= mgmtConfig.outOfRangeWaitMinutes) {
       return {

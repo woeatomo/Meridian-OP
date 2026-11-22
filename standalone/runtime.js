@@ -9,13 +9,14 @@ import fs from "node:fs";
 import { config, computeDeployAmount } from "../config.js";
 import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
-import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
+import { sendMessage as tgSend, isEnabled as tgEnabled, notifyAlert } from "../telegram.js";
 import { MonitorStore, finishSignal } from "./store.js";
 import { WalletMonitor } from "./monitor.js";
 import { screenMint, poolDetail } from "./screening.js";
 import { exposureStillPresent } from "./events.js";
 import { getMyPositions } from "../tools/dlmm.js";
-import { executeTool } from "../tools/executor.js";
+import { executeTool, sweepPendingSwaps } from "../tools/executor.js";
+import { maybeReshape } from "../modules/reshape-runner.js";
 import { getWalletBalances } from "../tools/wallet.js";
 import { getTrackedPositions, confirmPeak, updatePnlAndCheckExits, registerExitSignal, syncOpenPositions } from "../state.js";
 import { recordPositionSnapshot } from "../pool-memory.js";
@@ -223,6 +224,9 @@ export async function manageOnce() {
       return null;
     }
     syncOpenPositions(live.positions.map(p => p.position));
+    // Meridian-OP: retry base tokens the swap guard left unsold (not ones still in a position).
+    await sweepPendingSwaps({ openBaseMints: live.positions.map(p => p.base_mint).filter(Boolean) })
+      .catch(e => log("manage_warn", `Pending swap sweep failed: ${e.message}`));
     if (live.positions.length === 0) return "No open positions";
     for (const p of live.positions) {
       recordPositionSnapshot(p.pool, p);
@@ -271,8 +275,18 @@ function startPnlPoller() {
         if (exit) { signal = exit.action ?? "EXIT"; reason = exit.reason; }
         else if (closeRule) { signal = `RULE_${closeRule.rule}`; reason = closeRule.reason; }
         const { fire } = registerExitSignal(p.position, signal, confirmTicks);
-        if (!signal || !fire) continue;
+        if (!signal) {
+          // Meridian-OP: no exit pending — slow downtrend may warrant a reshape.
+          manageBusy = true;
+          let reshaped = null;
+          try { reshaped = await maybeReshape(p, { hasExitSignal: false, executeTool }); }
+          finally { manageBusy = false; }
+          if (reshaped) break; // one action per tick
+          continue;
+        }
+        if (!fire) continue;
         log("poll", `Exit confirmed (${confirmTicks} ticks): ${p.pair ?? p.position.slice(0, 8)} — ${reason} — closing`);
+        if (/emergency/i.test(reason || "")) notifyAlert("EMERGENCY_SL", `${p.pair ?? p.position.slice(0, 8)}: ${reason} — PnL ${p.pnl_pct}% | signals ${JSON.stringify(p.dump_signals ?? {})}`).catch(() => {});
         manageBusy = true; // hold the slow cycle off this position
         try {
           const res = await executeTool("close_position", { position_address: p.position, reason }).catch(e => ({ error: e.message }));

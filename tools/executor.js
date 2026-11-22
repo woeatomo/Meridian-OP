@@ -8,13 +8,14 @@ import {
   claimFees,
   closePosition,
   searchPools,
+  reshapePosition,
 } from "./dlmm.js";
 import { withWalletLock } from "../standalone/transactions.js";
 import { invalidateBalances } from "../standalone/balances.js";
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction } from "../state.js";
+import { setPositionInstruction, addPendingSwap, clearPendingSwap, getPendingSwaps } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -42,7 +43,7 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
-import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
+import { notifyDeploy, notifyClose, notifySwap, notifyReshape } from "../telegram.js";
 
 function numberOrNull(value) {
   const n = Number(value);
@@ -266,6 +267,7 @@ const toolMap = {
   check_smart_wallets_on_pool: checkSmartWalletsOnPool,
   claim_fees: claimFees,
   close_position: closePosition,
+  reshape_position: reshapePosition,
   get_wallet_balance: getWalletBalances,
   swap_token: swapToken,
   get_top_lpers: studyTopLPers,
@@ -395,6 +397,34 @@ const toolMap = {
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
+      // Meridian-OP: emergency SL, OOR kanan, dump detector, reshape, swap guard
+      emergencyStopLossPct: ["management", "emergencyStopLossPct"],
+      oorRightMaxWaitMinutes: ["management", "oorRightMaxWaitMinutes"],
+      oorRightMaxBinsAbove: ["management", "oorRightMaxBinsAbove"],
+      dumpPriceDropPct: ["management", "dumpPriceDropPct"],
+      dumpPriceWindowMin: ["management", "dumpPriceWindowMin"],
+      dumpBinDrop: ["management", "dumpBinDrop"],
+      dumpBinWindowMin: ["management", "dumpBinWindowMin"],
+      dumpRedCandles: ["management", "dumpRedCandles"],
+      dumpVolumeMult: ["management", "dumpVolumeMult"],
+      dumpSignalsRequired: ["management", "dumpSignalsRequired"],
+      dumpMinHistoryMin: ["management", "dumpMinHistoryMin"],
+      emergencySlMaxPerTokenPerDay: ["management", "emergencySlMaxPerTokenPerDay"],
+      emergencySlCooldownHours: ["management", "emergencySlCooldownHours"],
+      reshapeEnabled: ["management", "reshapeEnabled"],
+      reshapeStrategy: ["management", "reshapeStrategy"],
+      reshapeBins: ["management", "reshapeBins"],
+      reshapeCooldownMinutes: ["management", "reshapeCooldownMinutes"],
+      reshapeMaxPerPosition: ["management", "reshapeMaxPerPosition"],
+      reshapeConfirmMinutes: ["management", "reshapeConfirmMinutes"],
+      reshapeReboundToleranceBins: ["management", "reshapeReboundToleranceBins"],
+      reshapeMinPnlPct: ["management", "reshapeMinPnlPct"],
+      reshapeCostUsd: ["management", "reshapeCostUsd"],
+      reshapeFeeCostMultiple: ["management", "reshapeFeeCostMultiple"],
+      reshapeMaxBinsAbove: ["management", "reshapeMaxBinsAbove"],
+      maxSwapPriceImpactPct: ["management", "maxSwapPriceImpactPct"],
+      swapMaxChunks: ["management", "swapMaxChunks"],
+      relayCloseSlippageBps: ["management", "relayCloseSlippageBps"],
       // pnl poller
       pnlConfirmTicks: ["pnl", "confirmTicks"],
       // opportunity poller (interval/enabled changes apply on next restart)
@@ -591,6 +621,7 @@ const WRITE_TOOLS = new Set([
   "claim_fees",
   "close_position",
   "swap_token",
+  "reshape_position",
 ]);
 const PROTECTED_TOOLS = new Set([
   ...WRITE_TOOLS,
@@ -600,38 +631,105 @@ const PROTECTED_TOOLS = new Set([
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Swap a base token back to SOL with retry. Jupiter can transiently fail (no route,
- * quote error) and a single attempt silently leaves the token unsold — this retries
- * with a delay, re-fetching the balance each attempt (amounts can shift on partial
- * fills). Treats both a throw AND result.success===false / missing tx as failure.
- * Returns { swapped, result, token } — swapped=false if nothing to do or all attempts failed.
+ * Swap a base token back to SOL with retry + Meridian-OP swap guard.
+ * Jupiter can transiently fail (no route, quote error) — each attempt re-reads the
+ * balance. Every swap is quoted with `maxSwapPriceImpactPct`; when the full amount
+ * is blocked we halve the piece size (down to 1/`swapMaxChunks` of the balance) and
+ * sell piece by piece, re-quoting each time. If even the smallest piece is blocked
+ * the remainder stays in the wallet and is recorded as a pending swap that the
+ * management cycle retries (sweepPendingSwaps) — we never dump into a book whose
+ * impact is above the limit.
+ * Returns { swapped, result, token, blocked, remaining_usd }.
  */
 async function swapBaseToSolWithRetry(baseMint, label) {
   const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
   const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
+  const maxImpact = Number(config.management.maxSwapPriceImpactPct ?? 3);
+  const maxChunks = Math.max(1, Math.floor(Number(config.management.swapMaxChunks ?? 4)));
+  const minFraction = 1 / maxChunks;
   let lastErr = null;
+  let anySwapped = false;
+  let lastResult = null;
+  let fraction = 1; // fraction of the current balance to sell in the next piece
+  let blockedAtMin = false;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const balances = await getWalletBalances({ force: true });
-      if (balances.error) throw new Error("Balance unavailable after transaction");
-      const token = balances.tokens?.find((t) => t.mint === baseMint);
-      if (!token || token.balance <= 0 || (token.usd != null && token.usd < 0.10)) {
-        // Nothing left to swap (already sold or dust) — treat as done.
-        return { swapped: attempt > 1, result: null, token: null };
+      // Sell piece by piece until nothing is left or the guard blocks the smallest piece.
+      for (let step = 0; step < maxChunks * 3; step++) {
+        const balances = await getWalletBalances({ force: true });
+        if (balances.error) throw new Error("Balance unavailable after transaction");
+        const token = balances.tokens?.find((t) => t.mint === baseMint);
+        if (!token || token.balance <= 0 || (token.usd != null && token.usd < 0.10)) {
+          // Nothing left to swap (already sold or dust) — done.
+          clearPendingSwap(baseMint);
+          return { swapped: anySwapped || attempt > 1, result: lastResult, token: null, blocked: false, remaining_usd: 0 };
+        }
+        const amount = fraction >= 1 ? token.balance : token.balance * fraction;
+        const pieceLabel = fraction < 1 ? `piece ${Math.round(fraction * 100)}% ` : "";
+        const usdLabel = token.usd == null ? "unknown" : (token.usd * Math.min(1, fraction)).toFixed(2);
+        log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ${pieceLabel}($${usdLabel}) back to SOL (attempt ${attempt}/${attempts})`);
+        const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount, max_price_impact_pct: maxImpact });
+        if (swapResult?.blocked) {
+          if (fraction > minFraction + 1e-9) {
+            fraction = Math.max(minFraction, fraction / 2);
+            log("executor_warn", `Swap guard: ${swapResult.reason} — splitting, next piece ${Math.round(fraction * 100)}% of balance`);
+            continue;
+          }
+          blockedAtMin = true;
+          lastErr = swapResult.reason;
+          break;
+        }
+        const ok = swapResult && swapResult.success !== false && !swapResult.error && (swapResult.tx || swapResult.amount_out);
+        if (!ok) { lastErr = swapResult?.error || swapResult?.reason || "swap returned no tx"; break; }
+        anySwapped = true;
+        lastResult = swapResult;
+        if (fraction >= 1) {
+          clearPendingSwap(baseMint);
+          return { swapped: true, result: swapResult, token, blocked: false, remaining_usd: 0 };
+        }
+        // Piece sold — keep the same piece size for the remainder (re-quoted each loop).
       }
-      log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd == null ? "unknown" : token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})`);
-      const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
-      const ok = swapResult && swapResult.success !== false && !swapResult.error && (swapResult.tx || swapResult.amount_out);
-      if (ok) return { swapped: true, result: swapResult, token };
-      lastErr = swapResult?.error || swapResult?.reason || "swap returned no tx";
     } catch (e) {
       lastErr = e.message;
     }
+    if (blockedAtMin) break; // impact won't improve in a few seconds — leave it for the sweep
     log("executor_warn", `Auto-swap ${label} attempt ${attempt}/${attempts} failed: ${lastErr}`);
     if (attempt < attempts) await sleep(delayMs);
   }
-  log("executor_warn", `Auto-swap ${label} failed after ${attempts} attempts — base token left unsold (${baseMint.slice(0, 8)})`);
-  return { swapped: false, result: null, token: null };
+  let remainingUsd = null;
+  try {
+    const balances = await getWalletBalances({ force: true });
+    remainingUsd = balances.tokens?.find((t) => t.mint === baseMint)?.usd ?? null;
+  } catch { /* best-effort */ }
+  addPendingSwap(baseMint, blockedAtMin ? `price impact > ${maxImpact}%` : (lastErr || "swap failed"));
+  const why = blockedAtMin ? "blocked by swap guard" : `failed after ${attempts} attempts`;
+  const left = remainingUsd != null ? `, ~$${remainingUsd.toFixed(2)}` : "";
+  log("executor_warn", `Auto-swap ${label} ${why} — base token left unsold (${baseMint.slice(0, 8)}${left}); queued for retry`);
+  return { swapped: anySwapped, result: lastResult, token: null, blocked: blockedAtMin, remaining_usd: remainingUsd };
+}
+
+/**
+ * Retry swaps that the swap guard (or Jupiter) left unsold. Called from the
+ * management cycle. Skips mints that are still the base token of an open
+ * position (that token is part of a live position, e.g. after a reshape).
+ */
+export async function sweepPendingSwaps({ openBaseMints = [] } = {}) {
+  const pending = getPendingSwaps();
+  const mints = Object.keys(pending).filter((m) => !openBaseMints.includes(m));
+  if (!mints.length) return [];
+  return withWalletLock(async () => {
+    const out = [];
+    try {
+      for (const mint of mints) {
+        if (process.env.DRY_RUN === "true") { clearPendingSwap(mint); continue; }
+        const res = await swapBaseToSolWithRetry(mint, "pending sweep");
+        out.push({ mint, swapped: res.swapped, blocked: res.blocked });
+      }
+    } finally {
+      invalidateBalances();
+    }
+    return out;
+  }, 4);
 }
 
 /**
@@ -641,7 +739,7 @@ export async function executeTool(name, args = {}) {
   if (WRITE_TOOLS.has(name)) return withWalletLock(async () => {
     try { return await executeToolUnlocked(name, args); }
     finally { invalidateBalances(); }
-  }, name === "close_position" ? 10 : name === "deploy_position" ? 0 : 5);
+  }, name === "close_position" ? 10 : name === "reshape_position" ? 6 : name === "deploy_position" ? 0 : 5);
   return executeToolUnlocked(name, args);
 }
 async function executeToolUnlocked(name, args) {
@@ -706,9 +804,16 @@ async function executeToolUnlocked(name, args) {
             if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
           }
         }
+      } else if (name === "reshape_position") {
+        notifyReshape(result).catch(() => {});
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         await swapBaseToSolWithRetry(result.base_mint, "after claim");
       }
+    } else if (name === "reshape_position" && result?.funds_in_wallet) {
+      // Withdrawal happened but the redeploy failed: the old position is closed and its
+      // token sits in the wallet — treat like a close and sell it back (guarded).
+      if (result.base_mint) await swapBaseToSolWithRetry(result.base_mint, "after failed reshape");
+      notifyReshape(result).catch(() => {});
     }
 
     return result;
@@ -882,6 +987,24 @@ async function runSafetyChecks(name, args) {
         }
       }
 
+      return { pass: true };
+    }
+
+    case "reshape_position": {
+      if (config.management.reshapeEnabled !== true) {
+        return { pass: false, reason: "Reshape is disabled (management.reshapeEnabled=false)." };
+      }
+      if (!args.position_address) return { pass: false, reason: "position_address is required" };
+      const live = await getMyPositions({ force: true, silent: true });
+      if (live.error || !Array.isArray(live.positions)) return { pass: false, reason: "Position read unavailable" };
+      const p = live.positions.find((x) => x.position === args.position_address);
+      if (!p) return { pass: false, reason: "Position not found among open positions" };
+      // Re-check the dump/range state at submit time — the decision may be seconds old.
+      if (p.dump_confirmed === true) return { pass: false, reason: "Dump confirmed — reshape refused, exit rules decide" };
+      if (p.in_range === false) return { pass: false, reason: "Position out of range — reshape refused" };
+      if (!args.force && p.pnl_pct != null && p.pnl_pct <= (config.management.reshapeMinPnlPct ?? -12)) {
+        return { pass: false, reason: `PnL ${p.pnl_pct}% too close to stop loss — reshape refused` };
+      }
       return { pass: true };
     }
 

@@ -19,6 +19,7 @@
     "test:syntax": "find . -path ./node_modules -prune -o -name '*.js' -exec node --check {} \\;",
     "test:screen": "node test/test-screening.js",
     "test:agent": "DRY_RUN=true node test/test-agent.js",
+    "test:op": "node test/test-op.js && node test/test-standalone.js",
     "postinstall": "node scripts/patch-anchor.js"
   },
   "knip": {

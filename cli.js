@@ -655,6 +655,19 @@ switch (subcommand) {
     break;
   }
 
+  // ── reshape (Meridian-OP) ──────────────────────────────────────
+  case "reshape": {
+    if (!flags.position) die("Usage: meridian reshape --position <addr> [--strategy bid_ask|spot|curve] [--force]");
+    const { executeTool } = await import("./tools/executor.js");
+    out(await executeTool("reshape_position", {
+      position_address: flags.position,
+      strategy: flags.strategy || undefined,
+      reason: "manual reshape (CLI)",
+      force: argv.includes("--force"),
+    }));
+    break;
+  }
+
   // ── add-liquidity ──────────────────────────────────────────────
   case "add-liquidity": {
     if (!flags.position) die("Usage: meridian add-liquidity --position <addr> --pool <addr> [--amount-x <n>] [--amount-y <n>]");

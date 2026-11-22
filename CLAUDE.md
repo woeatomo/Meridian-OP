@@ -396,6 +396,22 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
 
 ---
 
+## Meridian-OP additions (branch `op-v2`)
+
+- **Annotation hook**: `getMyPositions` (local wallet, fresh loads) runs `modules/position-annotate.js#annotatePositions`
+  before any exit rule sees positions. It adds `dump_confirmed`, `dump_signals`, `bins_down_10m`,
+  `price_change_15m_pct`, `low_bin_10m`, `oor_side`, and for reshaped positions rewrites `pnl_pct` to the
+  **chained lineage PnL** (raw value in `pnl_pct_raw`). Every PnL rule (SL, Emergency SL, TP, trailing) uses it.
+- **Dump detector** (`modules/dump-detector.js`) keeps an in-memory tick history per position (lost on restart —
+  needs `dumpMinHistoryMin` of ticks before it can confirm). Exit Rule 0 (Emergency SL) requires `dump_confirmed`.
+- **OOR**: `state.js#updatePnlAndCheckExits` only closes OOR-left (or unknown side); OOR-right goes to exit-rules 3/4.
+- **Reshape**: `reshape_position` tool (WRITE/PROTECTED, lock priority 6) → `tools/dlmm.js#reshapePosition`.
+  Triggered only by `modules/reshape-runner.js#maybeReshape` from the fast pollers when no exit signal is pending.
+  Lineage lives in `state.json positions[addr].lineage` (`pnl_factor`, `reshape_count`, `anchor_top_bin`, …).
+- **Swap guard**: `swapToken({ max_price_impact_pct })` refuses before signing; `swapBaseToSolWithRetry` splits
+  and queues leftovers in `state.json pendingSwaps`, swept by both management cycles (`sweepPendingSwaps`).
+- Tests: `npm run test:op` (pure, no network).
+
 ## Known issues / tech debt (verified by reading the code)
 
 - **`lessons.js evolveThresholds()`** evolves `minOrganic` and `minFeeActiveTvlRatio` only.

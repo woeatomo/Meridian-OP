@@ -22,6 +22,7 @@ import {
   getTrackedPosition,
   minutesOutOfRange,
   syncOpenPositions,
+  setPositionLineage,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
@@ -30,6 +31,8 @@ import { appendDecision } from "../decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
+import { annotatePositions } from "../modules/position-annotate.js";
+import { planReshapeRange, nextPnlFactor } from "../modules/reshape-manager.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -401,6 +404,18 @@ async function getPool(poolAddress) {
 }
 
 setInterval(() => poolCache.clear(), 5 * 60 * 1000);
+
+// Bin step is immutable per pool — memoize forever (used by the dump detector).
+const binStepMemo = new Map();
+export async function getPoolBinStep(poolAddress) {
+  if (!poolAddress) return null;
+  const key = poolAddress.toString();
+  if (binStepMemo.has(key)) return binStepMemo.get(key);
+  const pool = await getPool(key);
+  const step = Number(pool?.lbPair?.binStep);
+  if (Number.isFinite(step) && step > 0) binStepMemo.set(key, step);
+  return Number.isFinite(step) && step > 0 ? step : null;
+}
 setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000);
 
 async function getPoolMetadata(poolAddress) {
@@ -449,6 +464,78 @@ export async function getActiveBin({ pool_address }) {
 }
 
 // ─── Deploy Position ───────────────────────────────────────────
+/**
+ * Create a new position over [minBinId, maxBinId] and add liquidity with the given
+ * strategy. Shared by deployPosition and reshapePosition.
+ * - Standard path (≤69 bins): initializePositionAndAddLiquidityByStrategy (1 tx).
+ * - Wide path (>69 bins): Solana limits inner instruction realloc to 10240 bytes, so a
+ *   large position can't be created in one initializePosition ix — use
+ *   createExtendedEmptyPosition, then addLiquidityByStrategyChunkable.
+ * Returns the confirmed tx signatures.
+ */
+async function submitNewPositionTxs({
+  pool,
+  wallet,
+  positionKeypair,
+  minBinId,
+  maxBinId,
+  totalXLamports,
+  totalYLamports,
+  strategyType,
+  before_submit = null,
+  label = "deploy",
+}) {
+  const txHashes = [];
+  const slippage = config.standalone.enabled ? 1 : 10; // SDK expects percent, not bps
+  if (maxBinId - minBinId > 69) {
+    // Phase 1: Create empty position (may be multiple txs)
+    const createTxs = await pool.createExtendedEmptyPosition(
+      minBinId,
+      maxBinId,
+      positionKeypair.publicKey,
+      wallet.publicKey,
+    );
+    const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
+    for (let i = 0; i < createTxArray.length; i++) {
+      const signers = i === 0 ? [wallet, positionKeypair] : [wallet];
+      await before_submit?.();
+      const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
+      txHashes.push(txHash);
+      log(label, `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
+    }
+
+    // Phase 2: Add liquidity (may be multiple txs)
+    const addTxs = await pool.addLiquidityByStrategyChunkable({
+      positionPubKey: positionKeypair.publicKey,
+      user: wallet.publicKey,
+      totalXAmount: totalXLamports,
+      totalYAmount: totalYLamports,
+      strategy: { minBinId, maxBinId, strategyType },
+      slippage,
+    });
+    const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
+    for (let i = 0; i < addTxArray.length; i++) {
+      await before_submit?.();
+      const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
+      txHashes.push(txHash);
+      log(label, `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
+    }
+  } else {
+    const tx = await pool.initializePositionAndAddLiquidityByStrategy({
+      positionPubKey: positionKeypair.publicKey,
+      user: wallet.publicKey,
+      totalXAmount: totalXLamports,
+      totalYAmount: totalYLamports,
+      strategy: { maxBinId, minBinId, strategyType },
+      slippage,
+    });
+    await before_submit?.();
+    const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet, positionKeypair]);
+    txHashes.push(txHash);
+  }
+  return txHashes;
+}
+
 export async function deployPosition({
   pool_address,
   amount_sol, // legacy: will be used as amount_y if amount_y is not provided
@@ -781,61 +868,18 @@ export async function deployPosition({
   log("deploy", `Position: ${newPosition.publicKey.toString()}`);
 
   try {
-    const txHashes = [];
-
-    if (isWideRange) {
-      // ── Wide Range Path (>69 bins) ─────────────────────────────────
-      // Solana limits inner instruction realloc to 10240 bytes, so we can't create
-      // a large position in a single initializePosition ix.
-      // Solution: createExtendedEmptyPosition (returns Transaction | Transaction[]),
-      //           then addLiquidityByStrategyChunkable (returns Transaction[]).
-
-      // Phase 1: Create empty position (may be multiple txs)
-      const createTxs = await pool.createExtendedEmptyPosition(
-        minBinId,
-        maxBinId,
-        newPosition.publicKey,
-        wallet.publicKey,
-      );
-      const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
-      for (let i = 0; i < createTxArray.length; i++) {
-        const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        await before_submit?.();
-        const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
-        txHashes.push(txHash);
-        log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
-      }
-
-      // Phase 2: Add liquidity (may be multiple txs)
-      const addTxs = await pool.addLiquidityByStrategyChunkable({
-        positionPubKey: newPosition.publicKey,
-        user: wallet.publicKey,
-        totalXAmount: totalXLamports,
-        totalYAmount: totalYLamports,
-        strategy: { minBinId, maxBinId, strategyType },
-        slippage: config.standalone.enabled ? 1 : 10, // SDK expects percent
-      });
-      const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
-      for (let i = 0; i < addTxArray.length; i++) {
-        await before_submit?.();
-        const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
-        txHashes.push(txHash);
-        log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
-      }
-    } else {
-      // ── Standard Path (≤69 bins) ─────────────────────────────────
-      const tx = await pool.initializePositionAndAddLiquidityByStrategy({
-        positionPubKey: newPosition.publicKey,
-        user: wallet.publicKey,
-        totalXAmount: totalXLamports,
-        totalYAmount: totalYLamports,
-        strategy: { maxBinId, minBinId, strategyType },
-        slippage: config.standalone.enabled ? 1 : 10, // SDK expects percent, not bps
-      });
-      await before_submit?.();
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet, newPosition]);
-      txHashes.push(txHash);
-    }
+    const txHashes = await submitNewPositionTxs({
+      pool,
+      wallet,
+      positionKeypair: newPosition,
+      minBinId,
+      maxBinId,
+      totalXLamports,
+      totalYLamports,
+      strategyType,
+      before_submit,
+      label: "deploy",
+    });
 
     log("deploy", `SUCCESS — ${txHashes.length} tx(s): ${txHashes[0]}`);
 
@@ -1378,7 +1422,12 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
   };
 
   if (useLocalWallet) {
-    _positionsInflight = loadPositions();
+    // Meridian-OP: annotate fresh loads (lineage PnL, dump detector, OOR side) before any
+    // exit rule sees them. Cached hits return the already-annotated objects.
+    _positionsInflight = loadPositions().then(async (result) => {
+      if (result?.positions?.length) await annotatePositions(result.positions, { binStepFor: getPoolBinStep });
+      return result;
+    });
     return _positionsInflight;
   }
 
@@ -1521,6 +1570,32 @@ export async function claimFees({ position_address }) {
 }
 
 // ─── Close Position ────────────────────────────────────────────
+/**
+ * Meridian-OP: a position born from reshape(s) records performance for the WHOLE
+ * lineage — initial capital of the first deploy and total hold time — so lessons and
+ * pool-memory judge the trade, not the last re-deposit. Falls back to
+ * deposits / pnl_factor when the original USD value wasn't recorded.
+ */
+function withLineagePerformance(tracked, perf) {
+  const lin = tracked?.lineage;
+  if (!lin) return perf;
+  const startedAt = new Date(lin.started_at).getTime();
+  const minutesHeld = Number.isFinite(startedAt) ? Math.floor((Date.now() - startedAt) / 60000) : perf.minutes_held;
+  const oorMinutes = Math.max(0, (perf.minutes_held ?? 0) - (perf.minutes_in_range ?? 0));
+  const factor = Number(lin.pnl_factor) > 0 ? Number(lin.pnl_factor) : 1;
+  const initial = Number(lin.initial_value_usd) > 0
+    ? Number(lin.initial_value_usd)
+    : (Number(perf.initial_value_usd) > 0 ? Number(perf.initial_value_usd) / factor : perf.initial_value_usd);
+  return {
+    ...perf,
+    initial_value_usd: initial,
+    minutes_held: minutesHeld,
+    minutes_in_range: Math.max(0, minutesHeld - oorMinutes),
+    reshape_count: lin.reshape_count ?? 0,
+    lineage_root: lin.root_position ?? null,
+  };
+}
+
 export async function closePosition({ position_address, reason }) {
   position_address = normalizeMint(position_address);
   if (process.env.DRY_RUN === "true") {
@@ -1558,7 +1633,7 @@ export async function closePosition({ position_address, reason }) {
           positionId: position_address,
           owner: wallet.publicKey.toString(),
           bps: 10000,
-          slippageBps: 5000,
+          slippageBps: Math.max(50, Math.min(5000, Number(config.management.relayCloseSlippageBps ?? 1000))),
           output: closeOutput,
           provider: "OKX",
           type: "meteora",
@@ -1694,7 +1769,7 @@ export async function closePosition({ position_address, reason }) {
           }
         } catch { /* non-blocking */ }
 
-        await recordPerformance({
+        await recordPerformance(withLineagePerformance(tracked, {
           position: position_address,
           pool: poolAddress,
           pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
@@ -1718,7 +1793,7 @@ export async function closePosition({ position_address, reason }) {
           entry_volume: tracked.entry_volume ?? null,
           entry_holders: tracked.entry_holders ?? null,
           ...exitMarket,
-        });
+        }));
 
         appendDecision({
           type: "close",
@@ -1999,7 +2074,7 @@ export async function closePosition({ position_address, reason }) {
         }
       } catch { /* non-blocking */ }
 
-      await recordPerformance({
+      await recordPerformance(withLineagePerformance(tracked, {
         position: position_address,
         pool: poolAddress,
         pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
@@ -2023,7 +2098,7 @@ export async function closePosition({ position_address, reason }) {
         entry_volume: tracked.entry_volume ?? null,
         entry_holders: tracked.entry_holders ?? null,
         ...exitMarket,
-      });
+      }));
 
       appendDecision({
         type: "close",
@@ -2110,4 +2185,303 @@ async function lookupPoolForPosition(position_address, walletAddress) {
   }
 
   throw new Error(`Position ${position_address} not found in open positions`);
+}
+
+// ─── Meridian-OP: Reshape / partial liquidity ops ───────────────
+
+/** Raw on-chain balances: token X (smallest unit) and SOL (native + wSOL ATA, lamports). */
+async function readRawBalances(owner, xMint) {
+  const conn = getConnection();
+  const sumParsed = (res) => (res?.value || []).reduce(
+    (acc, a) => acc.add(new BN(a.account?.data?.parsed?.info?.tokenAmount?.amount || "0")),
+    new BN(0),
+  );
+  const [native, xAccs, wsolAccs] = await Promise.all([
+    conn.getBalance(owner, "confirmed"),
+    conn.getParsedTokenAccountsByOwner(owner, { mint: new PublicKey(xMint) }, "confirmed"),
+    conn.getParsedTokenAccountsByOwner(owner, { mint: new PublicKey(config.tokens.SOL) }, "confirmed"),
+  ]);
+  return { x: sumParsed(xAccs), sol: new BN(String(native)).add(sumParsed(wsolAccs)) };
+}
+
+const RESHAPE_STRATEGIES = () => ({ spot: _StrategyType?.Spot, curve: _StrategyType?.Curve, bid_ask: _StrategyType?.BidAsk });
+
+/**
+ * Reshape: withdraw ALL liquidity (+claim, close account) WITHOUT swapping, then open a
+ * new position around the current active bin: token X above (up to the lineage anchor
+ * top bin), SOL Y below — both with `reshapeStrategy` (default bid_ask).
+ *
+ * Safety order:
+ *   1. plan the new range and verify its bin arrays already exist BEFORE touching funds;
+ *   2. measure wallet balance deltas around the withdrawal (exact amounts redeployed);
+ *   3. if the redeploy fails, the old position is recorded closed and the result says
+ *      `funds_in_wallet: true` + base_mint so the caller swaps the token back to SOL.
+ * PnL lineage: the new position stores pnl_factor = 1 + (chained PnL at reshape) so the
+ * stop loss / trailing keep measuring from the original capital.
+ */
+export async function reshapePosition({ position_address, reason = "reshape", strategy = null }) {
+  position_address = normalizeMint(position_address);
+  const tracked = getTrackedPosition(position_address);
+  if (!tracked || tracked.closed) return { success: false, error: "Position is not tracked or already closed" };
+  const cfg = config.management;
+  const strategyName = strategy || cfg.reshapeStrategy || "bid_ask";
+
+  const wallet = getWallet();
+  const poolAddress = tracked.pool || await lookupPoolForPosition(position_address, wallet.publicKey.toString());
+  await getDLMM();
+  const strategyType = RESHAPE_STRATEGIES()[strategyName];
+  if (strategyType === undefined) return { success: false, error: `Invalid reshape strategy ${strategyName}` };
+
+  poolCache.delete(poolAddress.toString());
+  const pool = await getPool(poolAddress);
+  const xMint = pool.lbPair.tokenXMint.toString();
+  if (pool.lbPair.tokenYMint.toString() !== config.tokens.SOL) return { success: false, error: "Reshape requires SOL as token Y" };
+  const positionPubKey = new PublicKey(position_address);
+  const positionInfo = await pool.getPosition(positionPubKey);
+  const pd = positionInfo?.positionData;
+  if (!pd) return { success: false, error: "Position data unavailable" };
+
+  const live = (await getMyPositions({ force: true, silent: true }))?.positions?.find((p) => p.position === position_address) || null;
+  const chainedPnlPct = live?.pnl_pct ?? null;
+  const lineage = tracked.lineage || null;
+  const anchorTop = lineage?.anchor_top_bin ?? tracked.bin_range?.max ?? pd.upperBinId;
+  const binsBelow = tracked.bin_range?.bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow;
+  const hasXNow = Number(pd.totalXAmount || 0) > 0;
+  const hasYNow = Number(pd.totalYAmount || 0) > 0;
+
+  // 1. Plan + bin-array check before touching funds.
+  let activeBinId = (await pool.getActiveBin()).binId;
+  let plan = planReshapeRange({ activeBin: activeBinId, anchorTop, binsBelow, hasX: hasXNow, hasY: hasYNow, cfg });
+  await assertRangeDoesNotRequireBinArrayInitialization(pool, plan.minBinId, plan.maxBinId);
+
+  if (process.env.DRY_RUN === "true") {
+    return {
+      dry_run: true,
+      would_reshape: { position: position_address, pool: poolAddress, strategy: strategyName, active_bin: activeBinId, ...plan, chained_pnl_pct: chainedPnlPct },
+      message: "DRY RUN — no transaction sent",
+    };
+  }
+
+  log("reshape", `Reshaping ${tracked.pool_name || position_address.slice(0, 8)}: active ${activeBinId}, old ${pd.lowerBinId}→${pd.upperBinId}, plan ${plan.minBinId}→${plan.maxBinId} (${strategyName}) — ${reason}`);
+
+  // 2. Withdraw everything (claim + close), measuring exact deltas.
+  const conn = getConnection();
+  const oldRent = (await conn.getAccountInfo(positionPubKey, "confirmed"))?.lamports ?? 0;
+  const before = await readRawBalances(wallet.publicKey, xMint);
+  const withdrawTxs = [];
+  const removeTx = await pool.removeLiquidity({
+    user: wallet.publicKey,
+    position: positionPubKey,
+    fromBinId: pd.lowerBinId,
+    toBinId: pd.upperBinId,
+    bps: new BN(10000),
+    shouldClaimAndClose: true,
+  });
+  for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
+    withdrawTxs.push(await sendAndConfirmTransaction(conn, tx, [wallet]));
+  }
+  // The old position is gone on-chain from here on: record it, and make every later
+  // failure return funds_in_wallet so the executor sells the token back to SOL.
+  _positionsCacheAt = 0;
+  recordClose(position_address, `reshape: ${reason}`);
+  const baseResult = { position: position_address, pool: poolAddress, pool_name: tracked.pool_name || null, base_mint: xMint, withdraw_txs: withdrawTxs };
+
+  const newPosition = Keypair.generate();
+  let deployTxs, deltaX, yLamports;
+  try {
+    await new Promise((r) => setTimeout(r, 2000));
+    const after = await readRawBalances(wallet.publicKey, xMint);
+    deltaX = BN.max(new BN(0), after.x.sub(before.x));
+    const deltaSol = BN.max(new BN(0), after.sol.sub(before.sol));
+    log("reshape", `Withdrawn: X=${deltaX.toString()} raw, SOL=${(Number(deltaSol.toString()) / 1e9).toFixed(4)} (txs ${withdrawTxs.join(", ")})`);
+
+    // 3. Redeploy. Keep SOL for the new position's rent (+ buffer) and the gas reserve.
+    activeBinId = (await pool.getActiveBin()).binId;
+    const hasX = deltaX.gt(new BN(0));
+    const rentReserve = Math.ceil(oldRent * 1.5) + 10_000_000; // wider range may cost more rent; +0.01 SOL fees
+    const walletSolAfter = Number(after.sol.toString());
+    const gasReserveLamports = Math.floor((cfg.gasReserve ?? 0.2) * 1e9);
+    yLamports = Math.max(0, Math.min(
+      Number(deltaSol.toString()) - rentReserve,
+      walletSolAfter - gasReserveLamports - rentReserve,
+    ));
+    const hasY = yLamports >= 1_000_000; // >= 0.001 SOL
+    if (!hasX && !hasY) throw new Error("nothing to redeploy after withdrawal");
+    plan = planReshapeRange({ activeBin: activeBinId, anchorTop, binsBelow, hasX, hasY, cfg });
+    await assertRangeDoesNotRequireBinArrayInitialization(pool, plan.minBinId, plan.maxBinId);
+    deployTxs = await submitNewPositionTxs({
+      pool,
+      wallet,
+      positionKeypair: newPosition,
+      minBinId: plan.minBinId,
+      maxBinId: plan.maxBinId,
+      totalXLamports: deltaX,
+      totalYLamports: new BN(String(Math.floor(yLamports))),
+      strategyType,
+      label: "reshape",
+    });
+  } catch (e) {
+    log("reshape_error", `Redeploy failed after withdrawal: ${e.message}`);
+    appendDecision({
+      type: "close",
+      actor: "MANAGER",
+      pool: poolAddress,
+      pool_name: tracked.pool_name,
+      position: position_address,
+      summary: "Reshape redeploy failed — funds left in wallet",
+      reason: `${reason}; redeploy error: ${e.message}`,
+      metrics: { chained_pnl_pct: chainedPnlPct },
+    });
+    return { ...baseResult, success: false, stage: "redeploy", funds_in_wallet: true, error: `Redeploy failed: ${e.message}` };
+  }
+  _positionsCacheAt = 0;
+
+  const newAddress = newPosition.publicKey.toString();
+  const pnlFactor = nextPnlFactor(lineage?.pnl_factor ?? 1, chainedPnlPct);
+  trackPosition({
+    position: newAddress,
+    pool: poolAddress,
+    pool_name: tracked.pool_name,
+    strategy: strategyName,
+    bin_range: { min: plan.minBinId, max: plan.maxBinId, bins_below: plan.bins_below, bins_above: plan.bins_above },
+    bin_step: pool.lbPair.binStep,
+    volatility: tracked.volatility,
+    fee_tvl_ratio: tracked.fee_tvl_ratio,
+    organic_score: tracked.organic_score,
+    amount_sol: Math.round(yLamports / 1e9 * 1e6) / 1e6,
+    amount_x: Number(deltaX.toString()),
+    active_bin: activeBinId,
+    initial_value_usd: tracked.initial_value_usd,
+    signal_snapshot: tracked.signal_snapshot,
+    entry_mcap: tracked.entry_mcap,
+    entry_tvl: tracked.entry_tvl,
+    entry_volume: tracked.entry_volume,
+    entry_holders: tracked.entry_holders,
+  });
+  setPositionLineage(newAddress, {
+    root_position: lineage?.root_position ?? position_address,
+    previous_position: position_address,
+    initial_value_usd: lineage?.initial_value_usd ?? tracked.initial_value_usd ?? null,
+    started_at: lineage?.started_at ?? tracked.deployed_at,
+    pnl_factor: pnlFactor,
+    reshape_count: (lineage?.reshape_count ?? 0) + 1,
+    anchor_top_bin: anchorTop,
+    last_reshape_at: new Date().toISOString(),
+    last_reshape_bin: activeBinId,
+  }, { peak_pnl_pct: tracked.peak_pnl_pct ?? 0, trailing_active: !!tracked.trailing_active });
+
+  appendDecision({
+    type: "reshape",
+    actor: "MANAGER",
+    pool: poolAddress,
+    pool_name: tracked.pool_name,
+    position: newAddress,
+    summary: `Reshaped to ${strategyName}: ${plan.minBinId}→${plan.maxBinId} (token above ${plan.bins_above} bins, SOL below ${plan.bins_below} bins)`,
+    reason,
+    metrics: {
+      previous_position: position_address,
+      active_bin: activeBinId,
+      chained_pnl_pct: chainedPnlPct,
+      reshape_count: (lineage?.reshape_count ?? 0) + 1,
+      amount_sol: yLamports / 1e9,
+      amount_x_raw: deltaX.toString(),
+    },
+  });
+
+  log("reshape", `SUCCESS — new position ${newAddress} (${deployTxs.length} tx)`);
+  return {
+    ...baseResult,
+    success: true,
+    new_position: newAddress,
+    strategy: strategyName,
+    bin_range: { min: plan.minBinId, max: plan.maxBinId, active: activeBinId },
+    bins_above: plan.bins_above,
+    bins_below: plan.bins_below,
+    amount_sol: yLamports / 1e9,
+    amount_x_raw: deltaX.toString(),
+    reshape_count: (lineage?.reshape_count ?? 0) + 1,
+    chained_pnl_pct: chainedPnlPct,
+    txs: [...withdrawTxs, ...deployTxs],
+  };
+}
+
+/** Remove `bps` (1-10000) of a position's liquidity, optionally claiming fees. Funds go to the wallet. */
+export async function withdrawLiquidity({ position_address, pool_address, bps = 10000, claim_fees = true }) {
+  position_address = normalizeMint(position_address);
+  const bpsNum = Math.round(Number(bps));
+  if (!Number.isFinite(bpsNum) || bpsNum < 1 || bpsNum > 10000) return { success: false, error: "bps must be 1-10000" };
+  if (process.env.DRY_RUN === "true") return { dry_run: true, would_withdraw: { position_address, pool_address, bps: bpsNum }, message: "DRY RUN — no transaction sent" };
+  try {
+    const wallet = getWallet();
+    const poolAddress = pool_address ? normalizeMint(pool_address) : await lookupPoolForPosition(position_address, wallet.publicKey.toString());
+    poolCache.delete(poolAddress.toString());
+    const pool = await getPool(poolAddress);
+    const positionPubKey = new PublicKey(position_address);
+    const pd = (await pool.getPosition(positionPubKey))?.positionData;
+    if (!pd) return { success: false, error: "Position data unavailable" };
+    const txs = await pool.removeLiquidity({
+      user: wallet.publicKey,
+      position: positionPubKey,
+      fromBinId: pd.lowerBinId,
+      toBinId: pd.upperBinId,
+      bps: new BN(bpsNum),
+      shouldClaimAndClose: bpsNum === 10000 && claim_fees,
+    });
+    const hashes = [];
+    for (const tx of Array.isArray(txs) ? txs : [txs]) hashes.push(await sendAndConfirmTransaction(getConnection(), tx, [wallet]));
+    if (claim_fees && bpsNum < 10000) {
+      try {
+        const claimTxs = await pool.claimSwapFee({ owner: wallet.publicKey, position: await pool.getPosition(positionPubKey) });
+        for (const tx of claimTxs || []) hashes.push(await sendAndConfirmTransaction(getConnection(), tx, [wallet]));
+      } catch (e) {
+        log("withdraw_warn", `Claim after partial withdraw failed: ${e.message}`);
+      }
+    }
+    _positionsCacheAt = 0;
+    if (bpsNum === 10000 && claim_fees) recordClose(position_address, "withdraw 100%");
+    return { success: true, position: position_address, pool: poolAddress, bps: bpsNum, base_mint: pool.lbPair.tokenXMint.toString(), txs: hashes };
+  } catch (e) {
+    log("withdraw_error", e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/** Add liquidity to an existing position across its current range. Amounts in UI units. */
+export async function addLiquidity({ position_address, pool_address, amount_x = 0, amount_y = 0, strategy = "spot", single_sided_x = false }) {
+  position_address = normalizeMint(position_address);
+  const x = Number(amount_x || 0), y = Number(single_sided_x ? 0 : amount_y || 0);
+  if (!(x >= 0) || !(y >= 0) || (x === 0 && y === 0)) return { success: false, error: "Provide a positive amount_x and/or amount_y" };
+  if (process.env.DRY_RUN === "true") return { dry_run: true, would_add: { position_address, pool_address, amount_x: x, amount_y: y, strategy }, message: "DRY RUN — no transaction sent" };
+  try {
+    const wallet = getWallet();
+    const poolAddress = pool_address ? normalizeMint(pool_address) : await lookupPoolForPosition(position_address, wallet.publicKey.toString());
+    await getDLMM();
+    const strategyType = RESHAPE_STRATEGIES()[strategy];
+    if (strategyType === undefined) return { success: false, error: `Invalid strategy ${strategy}` };
+    poolCache.delete(poolAddress.toString());
+    const pool = await getPool(poolAddress);
+    const positionPubKey = new PublicKey(position_address);
+    const pd = (await pool.getPosition(positionPubKey))?.positionData;
+    if (!pd) return { success: false, error: "Position data unavailable" };
+    let xDecimals = 9;
+    if (x > 0) {
+      const info = await getConnection().getParsedAccountInfo(new PublicKey(pool.lbPair.tokenXMint));
+      xDecimals = info.value?.data?.parsed?.info?.decimals ?? 9;
+    }
+    const txs = await pool.addLiquidityByStrategy({
+      positionPubKey,
+      user: wallet.publicKey,
+      totalXAmount: new BN(Math.floor(x * Math.pow(10, xDecimals)).toString()),
+      totalYAmount: new BN(Math.floor(y * 1e9).toString()),
+      strategy: { minBinId: pd.lowerBinId, maxBinId: pd.upperBinId, strategyType },
+      slippage: config.standalone.enabled ? 1 : 10,
+    });
+    const hashes = [];
+    for (const tx of Array.isArray(txs) ? txs : [txs]) hashes.push(await sendAndConfirmTransaction(getConnection(), tx, [wallet]));
+    _positionsCacheAt = 0;
+    return { success: true, position: position_address, pool: poolAddress, amount_x: x, amount_y: y, strategy, txs: hashes };
+  } catch (e) {
+    log("add_liquidity_error", e.message);
+    return { success: false, error: e.message };
+  }
 }

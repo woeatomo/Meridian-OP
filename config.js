@@ -143,10 +143,34 @@ export const config = {
     // Meridian-OP: OOR kanan (pump di atas range) — guard untuk HOLD bila PnL minus.
     oorRightMaxWaitMinutes: u.oorRightMaxWaitMinutes ?? 240,
     oorRightMaxBinsAbove:   u.oorRightMaxBinsAbove   ?? 25,
-    // Meridian-OP: Reshape (modules/reshape-manager.js)
+    // Meridian-OP: Dump detector (modules/dump-detector.js) — 2 dari 3 sinyal = dump terkonfirmasi.
+    dumpPriceDropPct:       u.dumpPriceDropPct       ?? 5,   // sinyal A: harga turun >= X% ...
+    dumpPriceWindowMin:     u.dumpPriceWindowMin     ?? 15,  // ... dalam N menit
+    dumpBinDrop:            u.dumpBinDrop            ?? 8,   // sinyal B: active bin turun >= X bin ...
+    dumpBinWindowMin:       u.dumpBinWindowMin       ?? 10,  // ... dalam N menit
+    dumpRedCandles:         u.dumpRedCandles         ?? 3,   // sinyal C: N candle 5m merah ...
+    dumpVolumeMult:         u.dumpVolumeMult         ?? 2,   // ... + volume > X kali rata-rata
+    dumpSignalsRequired:    u.dumpSignalsRequired    ?? 2,
+    dumpMinHistoryMin:      u.dumpMinHistoryMin      ?? 2,   // riwayat minimal sebelum sinyal A/B dipercaya
+    // Meridian-OP: max Emergency SL per token per hari -> cooldown token.
+    emergencySlMaxPerTokenPerDay: u.emergencySlMaxPerTokenPerDay ?? 2,
+    emergencySlCooldownHours:     u.emergencySlCooldownHours     ?? 24,
+    // Meridian-OP: Reshape (modules/reshape-manager.js) — satu arah ke bawah, Spot -> Bid-Ask.
+    reshapeEnabled:         u.reshapeEnabled         ?? false,
+    reshapeStrategy:        u.reshapeStrategy        ?? "bid_ask",
     reshapeBins:            u.reshapeBins            ?? 5,
     reshapeCooldownMinutes: u.reshapeCooldownMinutes ?? 45,
     reshapeMaxPerPosition:  u.reshapeMaxPerPosition  ?? 3,
+    reshapeConfirmMinutes:  u.reshapeConfirmMinutes  ?? 2,   // kondisi reshape harus bertahan N menit (hysteresis)
+    reshapeReboundToleranceBins: u.reshapeReboundToleranceBins ?? 2, // > low 10 mnt + X bin = rebound, jangan reshape
+    reshapeMinPnlPct:       u.reshapeMinPnlPct       ?? -12, // di bawah ini biarkan SL yang memutuskan
+    reshapeCostUsd:         u.reshapeCostUsd         ?? 0.25,// estimasi biaya tx reshape (rent posisi kembali)
+    reshapeFeeCostMultiple: u.reshapeFeeCostMultiple ?? 2,   // fee posisi harus >= X * biaya reshape
+    reshapeMaxBinsAbove:    u.reshapeMaxBinsAbove    ?? 69,  // batas bin sisi token di atas harga
+    // Meridian-OP: Swap guard (modules/swap-guard.js)
+    maxSwapPriceImpactPct:  u.maxSwapPriceImpactPct  ?? 3,
+    swapMaxChunks:          u.swapMaxChunks          ?? 4,   // pecah swap sampai N bagian bila impact tinggi
+    relayCloseSlippageBps:  u.relayCloseSlippageBps  ?? 1000,// zap-out relay (dulu hardcode 5000 = 50%)
     // Meridian-OP: Portfolio guard (modules/portfolio-guard.js)
     dailyLossLimitPct:      u.dailyLossLimitPct      ?? -5,
     portfolioKillSwitchPct: u.portfolioKillSwitchPct ?? -10,

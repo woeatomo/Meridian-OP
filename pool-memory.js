@@ -193,6 +193,24 @@ export function recordPoolDeploy(poolAddress, deployData) {
     }
   }
 
+  // Meridian-OP: N Emergency SL dalam 24 jam pada token yang sama -> cooldown token.
+  if (/emergency/i.test(String(deploy.close_reason || "")) && entry.base_mint) {
+    const maxPerDay = Math.max(1, Number(config.management.emergencySlMaxPerTokenPerDay ?? 2));
+    const hours = Math.max(0, Number(config.management.emergencySlCooldownHours ?? 24));
+    const since = Date.now() - 24 * 3600_000;
+    const count = Object.values(db)
+      .filter((e) => e?.base_mint === entry.base_mint)
+      .flatMap((e) => e.deploys || [])
+      .filter((d) => /emergency/i.test(String(d.close_reason || "")) && new Date(d.closed_at).getTime() >= since)
+      .length;
+    if (count >= maxPerDay && hours > 0) {
+      const reason = `${count}x emergency stop loss in 24h`;
+      const until = setBaseMintCooldown(db, entry.base_mint, hours, reason);
+      setPoolCooldown(entry, hours, reason);
+      log("pool-memory", `Emergency SL cooldown for ${entry.base_mint.slice(0, 8)} until ${until} (${reason})`);
+    }
+  }
+
   if (config.management.repeatDeployCooldownEnabled) {
     const triggerCount = Math.max(1, Number(config.management.repeatDeployCooldownTriggerCount ?? 3));
     const cooldownHours = Math.max(0, Number(config.management.repeatDeployCooldownHours ?? 12));
