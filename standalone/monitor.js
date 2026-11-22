@@ -4,10 +4,11 @@ import { connection, readRpc, fetchJson } from './rpc.js';
 import { transactionEntries } from './events.js';
 import { acceptEvents } from './store.js';
 import { log } from '../logger.js';
+import { getActiveRpcUrl, getActiveWsUrl, onRpcSwitch } from '../modules/rpc-health.js';
 
 export class WalletMonitor {
-  constructor(store, options, { rpc = readRpc, wallets = listSmartWallets, entries = transactionEntries, onSignal = () => {} } = {}) {
-    Object.assign(this, { store, options, rpc, wallets, entries, onSignal });
+  constructor(store, options, { rpc = readRpc, wallets = listSmartWallets, entries = transactionEntries, onSignal = () => {}, wsFactory = connection, rpcHealth = { getActiveRpcUrl, getActiveWsUrl, onRpcSwitch } } = {}) {
+    Object.assign(this, { store, options, rpc, wallets, entries, onSignal, wsFactory, rpcHealth });
     this.subscriptions = new Map(); this.running = false; this.reconciling = false; this.draining = false;
     this.stats = { transactions: 0, entries: 0, lastLagMs: null, errors: 0 };
   }
@@ -26,9 +27,34 @@ export class WalletMonitor {
       return state && !state.error && Date.now() - state.reconciledAt < this.options.reconcileSec * 3000;
     });
   }
+  // Meridian-OP: unless a dedicated MONITOR_RPC_URL is configured, the websocket follows the
+  // shared RPC failover (modules/rpc-health.js) and re-subscribes when the endpoint switches.
+  followsFailover() {
+    return !this.options.monitorRpcUrl || this.options.monitorRpcUrl === process.env.RPC_URL;
+  }
+  wsTarget() {
+    if (!this.followsFailover()) return { url: this.options.monitorRpcUrl, ws: this.options.monitorWsUrl };
+    const url = this.rpcHealth.getActiveRpcUrl() || this.options.monitorRpcUrl;
+    const ws = this.rpcHealth.getActiveWsUrl() || (url === this.options.monitorRpcUrl ? this.options.monitorWsUrl : null);
+    return { url, ws };
+  }
+  async reconnectWs(reason = 'rpc switch') {
+    if (!this.running) return;
+    const old = this.ws;
+    const ids = [...this.subscriptions.values()];
+    this.subscriptions.clear();
+    await Promise.allSettled(ids.map(id => old?.removeOnLogsListener(id)));
+    const target = this.wsTarget();
+    this.ws = this.wsFactory(target.url, target.ws || undefined);
+    log('monitor', `Websocket re-opened (${reason}) — re-subscribing ${ids.length} wallet(s) and backfilling missed transactions`);
+    // reconcile() re-subscribes every wallet and backfills signatures since each cursor.
+    if (this.reconciling) this.reconcileAgain = true; else await this.reconcile();
+  }
   async start() {
     this.running = true;
-    this.ws = connection(this.options.monitorRpcUrl, this.options.monitorWsUrl);
+    const target = this.wsTarget();
+    this.ws = this.wsFactory(target.url, target.ws || undefined);
+    if (this.followsFailover()) this.offSwitch = this.rpcHealth.onRpcSwitch((info) => { void this.reconnectWs(`RPC failover → ${info.name}`); });
     await this.reconcile();
     this.reconcileTimer = setInterval(() => this.reconcile(), this.options.reconcileSec * 1000);
     this.queueTimer = setInterval(() => this.drain(), 1000);
@@ -89,7 +115,10 @@ export class WalletMonitor {
           log('monitor_warn', `Wallet ${w.address.slice(0, 8)}: ${e.message}`);
         }
       }
-    } finally { this.reconciling = false; }
+    } finally {
+      this.reconciling = false;
+      if (this.reconcileAgain) { this.reconcileAgain = false; void this.reconcile(); }
+    }
   }
   async drain() {
     if (!this.running || this.draining) return;
@@ -123,6 +152,7 @@ export class WalletMonitor {
   }
   async stop() {
     this.running = false;
+    this.offSwitch?.();
     clearInterval(this.reconcileTimer); clearInterval(this.queueTimer);
     await Promise.allSettled([...this.subscriptions.values()].map(id => this.ws.removeOnLogsListener(id)));
     this.subscriptions.clear();

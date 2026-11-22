@@ -283,6 +283,33 @@ console.log("\n[10] RPC failover + safe mode");
     "https://plain.example",
   ] });
   check("parse rpc-endpoints.json (skip disabled / invalid, accept strings)", parsed.length === 2 && parsed[0].name === "helius-1" && parsed[1].url === "https://plain.example");
+  const withEnv = R.parseEndpointsFile({ endpoints: [
+    { name: "qn", url: "env:QN_URL", ws: "env:QN_WS" },
+    { name: "missing", url: "env:NOT_SET" },
+    { name: "badws", url: "https://x.example", ws: "https://not-ws" },
+  ] }, { QN_URL: "https://qn.example/token/", QN_WS: "wss://qn.example/token/" });
+  check("env: references resolve, missing env skipped, ws validated", withEnv.length === 2 && withEnv[0].url === "https://qn.example/token/" && withEnv[0].ws === "wss://qn.example/token/" && withEnv[1].ws === null);
+
+  // Wallet monitor websocket follows the failover.
+  const { WalletMonitor } = await import("../standalone/monitor.js");
+  let switchFn = null;
+  const opened = [], removed = [];
+  const fakeHealth = { getActiveRpcUrl: () => active.url, getActiveWsUrl: () => active.ws, onRpcSwitch: (fn) => { switchFn = fn; return () => { switchFn = null; }; } };
+  let active = { url: "https://a.example", ws: "wss://a.example" };
+  const fakeWs = (url, ws) => { const c = { url, ws, removeOnLogsListener: async (id) => removed.push(`${url}#${id}`) }; opened.push(c); return c; };
+  const mon = new WalletMonitor({ data: { wallets: {} }, save() {} }, { monitorRpcUrl: process.env.RPC_URL || "", monitorWsUrl: null, reconcileSec: 3600 }, { wallets: () => ({ wallets: [] }), wsFactory: fakeWs, rpcHealth: fakeHealth });
+  mon.reconcile = async function () { this.reconciled = (this.reconciled || 0) + 1; };
+  mon.running = true;
+  const target = mon.wsTarget();
+  mon.ws = fakeWs(target.url, target.ws);
+  mon.offSwitch = fakeHealth.onRpcSwitch((info) => mon.reconnectWs(info.name));
+  mon.subscriptions.set("WalletA", 7);
+  active = { url: "https://b.example", ws: "wss://b.example" };
+  await switchFn({ name: "b" });
+  check("monitor websocket re-opened on the new endpoint", opened.at(-1).url === "https://b.example" && opened.at(-1).ws === "wss://b.example");
+  check("old subscriptions removed, reconcile re-subscribes + backfills", removed.includes("https://a.example#7") && mon.subscriptions.size === 0 && mon.reconciled === 1);
+  const dedicated = new WalletMonitor({ data: { wallets: {} }, save() {} }, { monitorRpcUrl: "https://dedicated.example", monitorWsUrl: "wss://dedicated.example" }, { rpcHealth: fakeHealth });
+  check("dedicated MONITOR_RPC_URL keeps its own websocket", !dedicated.followsFailover() && dedicated.wsTarget().url === "https://dedicated.example");
   R._resetRpcHealth(null);
 }
 

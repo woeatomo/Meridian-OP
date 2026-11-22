@@ -428,6 +428,10 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
   + RPC_URLS + FALLBACK_RPC_URL. `rpcConnection()` (dlmm/wallet/pnl) and `standalone/rpc.js#readRpc` use
   `trackedFetch`, which reports every request: 429 → cooldown + rotate, repeated 5xx/network → cooldown + rotate.
   Never log endpoint URLs (API keys) — names only. Safe mode (`isRpcSafeMode`) blocks deploy and reshape.
+  `rpc-endpoints.json` is the single RPC config: `config.js` derives RPC_URL (+ MONITOR_WS_URL) from its first entry
+  when unset (`RPC_URL_FROM_FILE=1`, so rpc-health doesn't list it twice). Entries support `ws` and `env:VAR` values
+  (`modules/rpc-endpoints-file.js`). The standalone `WalletMonitor` websocket follows the failover via
+  `onRpcSwitch` (re-subscribe + reconcile backfill) unless a dedicated MONITOR_RPC_URL is set.
 - **Dump history persistence**: `enableHistoryPersistence(repoPath("dump-history.json"))` in both runtimes' start.
 - Tests: `npm run test:op` (pure, no network).
 

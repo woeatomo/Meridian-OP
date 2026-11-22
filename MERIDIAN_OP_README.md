@@ -57,6 +57,27 @@ Lessons / pool-memory mencatat satu trade per lineage (modal awal + total durasi
 - Format respons OHLCV Meteora belum diverifikasi dari container build; parser dibuat defensif.
   Bila fetch gagal, sinyal candle dianggap tidak aktif (dump butuh harga + bin).
 
+## Setting RPC (satu tempat: `rpc-endpoints.json`)
+
+Semua RPC diatur di **`rpc-endpoints.json`** saja. `RPC_URL` di `.env` dan `rpcUrl` di
+`user-config.json` **tidak perlu diisi** — kalau kosong, endpoint pertama di file dipakai sebagai
+RPC utama. (Kalau masih diisi, tetap jalan dan jadi prioritas pertama; sebaiknya hapus supaya
+tidak ada dua tempat.)
+
+```bash
+cp rpc-endpoints.example.json rpc-endpoints.json && chmod 600 rpc-endpoints.json
+```
+
+- Urutan = prioritas. Endpoint pertama = utama, sisanya cadangan.
+- `ws` (opsional) = alamat websocket provider; dipakai monitor smart wallet dan ikut pindah saat failover.
+- `"url": "env:NAMA_VAR"` = nilai diambil dari `.env` — API key bisa tetap di `.env` yang dienkripsi
+  (`npm run env:encrypt`), file JSON hanya berisi nama variabel.
+- File dibaca ulang otomatis saat diubah (tambah / hapus / ganti key tanpa restart).
+- Cek: `node cli.js rpc`.
+
+Opsional, hanya kalau perlu RPC terpisah: `MONITOR_RPC_URL` + `MONITOR_WS_URL` (monitor wallet
+memakai endpoint ini dan TIDAK ikut failover), `BALANCE_RPC_URL`, `PNL_RPC_URL`.
+
 ## Deploy di VPS
 
 ```bash

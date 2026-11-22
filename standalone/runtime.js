@@ -398,7 +398,7 @@ async function shutdown(signalName) {
 }
 
 export async function startStandalone() {
-  if (!config.standalone.monitorRpcUrl) throw new Error("Standalone requires RPC_URL or MONITOR_RPC_URL");
+  if (!config.standalone.monitorRpcUrl) throw new Error("Standalone needs an RPC: add endpoints to rpc-endpoints.json (or set RPC_URL / MONITOR_RPC_URL)");
   acquireLock();
   startRpcHealthMonitor({ notify: portfolioNotify });
   const restored = enableHistoryPersistence(repoPath("dump-history.json"));

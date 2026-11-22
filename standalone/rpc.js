@@ -8,7 +8,7 @@ export async function fetchJson(url, options = {}) {
   return response.json();
 }
 export function connection(url, wsEndpoint) {
-  if (!url) throw new Error('Configure RPC_URL (and optionally MONITOR_RPC_URL/BALANCE_RPC_URL)');
+  if (!url) throw new Error('No RPC configured: add endpoints to rpc-endpoints.json (or set RPC_URL)');
   return new Connection(url, {
     commitment: 'confirmed', ...(wsEndpoint ? { wsEndpoint } : {}),
     disableRetryOnRateLimit: true,
@@ -24,7 +24,7 @@ export async function readRpc(kind, fn) {
   const dedicated = kind === 'balance' ? config.standalone.balanceRpcUrl : config.standalone.monitorRpcUrl;
   const shared = orderedRpcUrls();
   const urls = [...new Set([dedicated !== process.env.RPC_URL ? dedicated : null, ...shared, config.standalone.fallbackRpcUrl].filter(Boolean))];
-  if (!urls.length) throw new Error('RPC_URL is required');
+  if (!urls.length) throw new Error('No RPC configured: add endpoints to rpc-endpoints.json (or set RPC_URL)');
   let error;
   for (const url of urls) {
     try {

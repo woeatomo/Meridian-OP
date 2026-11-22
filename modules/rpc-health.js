@@ -1,8 +1,10 @@
 // rpc-health.js — Meridian-OP P1 C5: multi-endpoint RPC failover + safe mode.
 //
 // Endpoints (urutan = prioritas), digabung tanpa duplikat:
-//   1. RPC_URL (.env)                      -> "primary"
-//   2. rpc-endpoints.json (repo root, gitignored — berisi API key!)  { "endpoints": [{ "name", "url" }] }
+//   1. RPC_URL (.env / user-config rpcUrl) -> "primary" (opsional — kalau kosong, config.js
+//      memakai endpoint pertama rpc-endpoints.json sebagai RPC_URL)
+//   2. rpc-endpoints.json (repo root, gitignored)  { "endpoints": [{ "name", "url", "ws"? }] }
+//      url/ws boleh "env:NAMA_VAR" agar API key tetap di .env (lihat rpc-endpoints-file.js)
 //   3. RPC_URLS (.env, dipisah koma)
 //   4. FALLBACK_RPC_URL / user-config fallbackRpcUrl
 // rpc-endpoints.json dibaca ulang otomatis bila file berubah (tanpa restart).
@@ -25,6 +27,7 @@ import { Connection } from "@solana/web3.js";
 import { config } from "../config.js";
 import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
+import { readEndpointsFile, parseEndpointsFile } from "./rpc-endpoints-file.js";
 
 const ENDPOINTS_FILE = repoPath("rpc-endpoints.json");
 
@@ -43,41 +46,35 @@ const connections = new Map();
 
 function cfg() { return config.management || {}; }
 
+function validWsUrl(u) {
+  return typeof u === "string" && /^wss?:\/\/\S+$/i.test(u.trim()) ? u.trim() : null;
+}
+
 function validUrl(u) {
   if (typeof u !== "string") return null;
   const t = u.trim();
   return /^https?:\/\/\S+$/i.test(t) ? t : null;
 }
 
-/** Parse rpc-endpoints.json content. Pure. Accepts {endpoints:[...]} or a bare array of objects/strings. */
-export function parseEndpointsFile(raw) {
-  const list = Array.isArray(raw) ? raw : Array.isArray(raw?.endpoints) ? raw.endpoints : [];
-  return list
-    .map((e, i) => (typeof e === "string" ? { name: `file-${i + 1}`, url: e } : e))
-    .filter((e) => e && e.enabled !== false)
-    .map((e, i) => ({ name: String(e.name || `file-${i + 1}`).replace(/[^\w.-]/g, "").slice(0, 32) || `file-${i + 1}`, url: validUrl(e.url) }))
-    .filter((e) => e.url);
-}
+export { parseEndpointsFile };
 
 function readFileEndpoints() {
-  try {
-    const st = fs.statSync(ENDPOINTS_FILE);
-    return { mtime: st.mtimeMs, list: parseEndpointsFile(JSON.parse(fs.readFileSync(ENDPOINTS_FILE, "utf8"))) };
-  } catch (e) {
-    if (e.code !== "ENOENT") log("rpc_warn", `rpc-endpoints.json unreadable (${e.message}) — ignoring file`);
-    return { mtime: null, list: [] };
-  }
+  const r = readEndpointsFile(ENDPOINTS_FILE);
+  if (r.error) log("rpc_warn", `rpc-endpoints.json unreadable (${r.error}) — ignoring file`);
+  return r;
 }
 
 function buildEndpoints() {
   const file = readFileEndpoints();
   state.fileMtime = file.mtime;
+  // RPC_URL derived from the file by config.js is just the file's first entry — don't list it twice.
+  const fromFile = process.env.RPC_URL_FROM_FILE === "1";
   const raw = [
-    { name: "primary", url: validUrl(process.env.RPC_URL) },
+    fromFile ? null : { name: "primary", url: validUrl(process.env.RPC_URL), ws: validWsUrl(process.env.MONITOR_WS_URL) },
     ...file.list,
     ...String(process.env.RPC_URLS || "").split(",").map((u, i) => ({ name: `env-${i + 1}`, url: validUrl(u) })),
     { name: "fallback", url: validUrl(config.standalone?.fallbackRpcUrl || process.env.FALLBACK_RPC_URL) },
-  ].filter((e) => e.url);
+  ].filter((e) => e?.url);
   const seen = new Set();
   const out = [];
   for (const e of raw) {
@@ -89,7 +86,7 @@ function buildEndpoints() {
 }
 
 function freshEndpoint(e, prev) {
-  return { name: e.name, url: e.url, fails: prev?.fails ?? 0, oks: prev?.oks ?? 0, cooldownUntil: prev?.cooldownUntil ?? 0, errors: prev?.errors ?? [], requests: prev?.requests ?? 0, errorsTotal: prev?.errorsTotal ?? 0 };
+  return { name: e.name, url: e.url, ws: e.ws || null, fails: prev?.fails ?? 0, oks: prev?.oks ?? 0, cooldownUntil: prev?.cooldownUntil ?? 0, errors: prev?.errors ?? [], requests: prev?.requests ?? 0, errorsTotal: prev?.errorsTotal ?? 0 };
 }
 
 function endpoints() {
@@ -135,12 +132,21 @@ export function orderedRpcUrls(now = Date.now()) {
 
 function indexOfUrl(url) { return endpoints().findIndex((e) => e.url === url); }
 
+const switchListeners = new Set();
+/** Subscribe to active-endpoint changes (e.g. the wallet monitor re-opens its websocket). */
+export function onRpcSwitch(fn) { switchListeners.add(fn); return () => switchListeners.delete(fn); }
+
+/** Active endpoint's websocket URL (null = let web3.js derive it from the http URL). */
+export function getActiveWsUrl() { return endpoints()[state.active]?.ws ?? null; }
+
 function switchTo(idx, why, now = Date.now()) {
   if (idx === state.active || idx < 0) return;
   const from = endpoints()[state.active]?.name, to = endpoints()[idx]?.name;
   state.active = idx;
   log("rpc_warn", `RPC failover: ${from} → ${to} (${why})`);
   state.notify?.("RPC_FAILOVER", `RPC switched ${from} → ${to} (${why})`);
+  const info = { url: endpoints()[idx].url, ws: endpoints()[idx].ws, name: to, why };
+  for (const fn of switchListeners) { try { fn(info); } catch (e) { log("rpc_warn", `RPC switch listener failed: ${e.message}`); } }
 }
 
 /** Next usable endpoint after `from` that is not cooling down; null if none. */
@@ -208,7 +214,7 @@ export function trackedConnection(url, commitment = "confirmed", extra = {}) {
 /** Connection to the currently active RPC. */
 export function rpcConnection(commitment = "confirmed") {
   const url = getActiveRpcUrl();
-  if (!url) throw new Error("RPC_URL not set");
+  if (!url) throw new Error("No RPC configured: add endpoints to rpc-endpoints.json (or set RPC_URL)");
   return trackedConnection(url, commitment);
 }
 

@@ -1,8 +1,8 @@
 {
-  "_comment": "Salin ke rpc-endpoints.json (sudah di .gitignore — berisi API key, jangan di-commit / dibagikan). Urutan = prioritas setelah RPC_URL di .env. Bot pindah otomatis saat 429 / error berulang, dan file ini dibaca ulang tanpa restart. Campur provider berbeda (Helius, QuickNode, Alchemy, Triton, ...) agar satu provider down tidak mematikan semuanya.",
+  "_comment": "Satu-satunya tempat setting RPC. Salin ke rpc-endpoints.json (sudah di .gitignore — jangan di-commit / dibagikan). Urutan = prioritas: endpoint pertama dipakai sebagai RPC utama, sisanya cadangan; bot pindah otomatis saat 429 / error berulang / health check gagal, dan file ini dibaca ulang tanpa restart. RPC_URL di .env / rpcUrl di user-config.json TIDAK perlu diisi (kalau diisi, dipakai sebagai prioritas pertama). 'ws' opsional: isi kalau provider punya alamat websocket khusus. 'env:NAMA' = ambil nilai dari .env (API key tetap di .env yang bisa dienkripsi). Campur provider berbeda agar satu provider down tidak mematikan semuanya.",
   "endpoints": [
-    { "name": "helius",    "url": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY" },
-    { "name": "quicknode", "url": "https://YOUR-ENDPOINT.solana-mainnet.quiknode.pro/YOUR_TOKEN/" },
+    { "name": "helius",    "url": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY", "ws": "wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY" },
+    { "name": "quicknode", "url": "env:QUICKNODE_RPC_URL", "ws": "env:QUICKNODE_WS_URL" },
     { "name": "alchemy",   "url": "https://solana-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY" },
     { "name": "public",    "url": "https://api.mainnet-beta.solana.com", "enabled": false }
   ]

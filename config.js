@@ -1,5 +1,6 @@
 import fs from "fs";
 import { REPO_ROOT, repoPath } from "./repo-root.js";
+import { readEndpointsFile } from "./modules/rpc-endpoints-file.js";
 import { getScreeningDefaultsForTimeframe, normalizeTimeframe, scaleScreeningToTimeframe, TIMEFRAME_SCREENING_SCALES } from "./screening-scales.js";
 
 export { REPO_ROOT, repoPath, getScreeningDefaultsForTimeframe, normalizeTimeframe, scaleScreeningToTimeframe, TIMEFRAME_SCREENING_SCALES };
@@ -42,6 +43,21 @@ if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
 if (u.publicApiKey) process.env.PUBLIC_API_KEY ||= u.publicApiKey;
 if (u.agentMeridianApiUrl) process.env.AGENT_MERIDIAN_API_URL ||= u.agentMeridianApiUrl;
 if (u.telegramChatId) process.env.TELEGRAM_CHAT_ID ||= String(u.telegramChatId);
+
+// Meridian-OP: rpc-endpoints.json is the single place for RPC settings. When neither
+// .env nor user-config sets RPC_URL, the first enabled endpoint becomes RPC_URL (and its
+// "ws" the monitor websocket), so every module that reads RPC_URL keeps working.
+// modules/rpc-health.js then fails over across the whole list.
+{
+  const rpcFile = readEndpointsFile(repoPath("rpc-endpoints.json"));
+  if (rpcFile.error) console.warn(`[config] rpc-endpoints.json unreadable: ${rpcFile.error}`);
+  const first = rpcFile.list[0];
+  if (!process.env.RPC_URL && first) {
+    process.env.RPC_URL = first.url;
+    process.env.RPC_URL_FROM_FILE = "1";
+    if (first.ws && !process.env.MONITOR_WS_URL && !u.monitorWsUrl) process.env.MONITOR_WS_URL = first.ws;
+  }
+}
 
 const indicatorUserConfig = u.chartIndicators ?? {};
 
