@@ -1,5 +1,6 @@
 import { Connection } from '@solana/web3.js';
 import { config } from '../config.js';
+import { orderedRpcUrls, trackedConnection } from '../modules/rpc-health.js';
 
 export async function fetchJson(url, options = {}) {
   const response = await fetch(url, { ...options, signal: options.signal ?? AbortSignal.timeout(10_000) });
@@ -7,7 +8,7 @@ export async function fetchJson(url, options = {}) {
   return response.json();
 }
 export function connection(url, wsEndpoint) {
-  if (!url) throw new Error('Configure RPC_URL (and optionally MONITOR_RPC_URL/BALANCE_RPC_URL)');
+  if (!url) throw new Error('No RPC configured: add endpoints to rpc-endpoints.json (or set RPC_URL)');
   return new Connection(url, {
     commitment: 'confirmed', ...(wsEndpoint ? { wsEndpoint } : {}),
     disableRetryOnRateLimit: true,
@@ -15,14 +16,19 @@ export function connection(url, wsEndpoint) {
   });
 }
 const connections = new Map();
+// Reads go through the shared endpoint list (modules/rpc-health.js): active endpoint
+// first, cooling ones last, every request's outcome reported so 429s / errors rotate
+// the whole bot. A dedicated MONITOR_RPC_URL / BALANCE_RPC_URL (different from RPC_URL)
+// stays first for its kind.
 export async function readRpc(kind, fn) {
-  const primary = kind === 'balance' ? config.standalone.balanceRpcUrl : config.standalone.monitorRpcUrl;
-  const urls = [...new Set([primary, config.standalone.fallbackRpcUrl].filter(Boolean))];
-  if (!urls.length) throw new Error('RPC_URL is required');
+  const dedicated = kind === 'balance' ? config.standalone.balanceRpcUrl : config.standalone.monitorRpcUrl;
+  const shared = orderedRpcUrls();
+  const urls = [...new Set([dedicated !== process.env.RPC_URL ? dedicated : null, ...shared, config.standalone.fallbackRpcUrl].filter(Boolean))];
+  if (!urls.length) throw new Error('No RPC configured: add endpoints to rpc-endpoints.json (or set RPC_URL)');
   let error;
   for (const url of urls) {
     try {
-      if (!connections.has(url)) connections.set(url, connection(url));
+      if (!connections.has(url)) connections.set(url, trackedConnection(url, 'confirmed'));
       return await fn(connections.get(url));
     } catch (e) { error = e; }
   }

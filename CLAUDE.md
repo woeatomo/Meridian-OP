@@ -396,6 +396,46 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
 
 ---
 
+## Meridian-OP additions (branch `op-v2`)
+
+- **Annotation hook**: `getMyPositions` (local wallet, fresh loads) runs `modules/position-annotate.js#annotatePositions`
+  before any exit rule sees positions. It adds `dump_confirmed`, `dump_signals`, `bins_down_10m`,
+  `price_change_15m_pct`, `low_bin_10m`, `oor_side`, and for reshaped positions rewrites `pnl_pct` to the
+  **chained lineage PnL** (raw value in `pnl_pct_raw`). Every PnL rule (SL, Emergency SL, TP, trailing) uses it.
+- **Dump detector** (`modules/dump-detector.js`) keeps an in-memory tick history per position (lost on restart —
+  needs `dumpMinHistoryMin` of ticks before it can confirm). Exit Rule 0 (Emergency SL) requires `dump_confirmed`.
+- **OOR**: `state.js#updatePnlAndCheckExits` only closes OOR-left (or unknown side); OOR-right goes to exit-rules 3/4.
+- **Reshape**: `reshape_position` tool (WRITE/PROTECTED, lock priority 6) → `tools/dlmm.js#reshapePosition`.
+  Triggered only by `modules/reshape-runner.js#maybeReshape` from the fast pollers when no exit signal is pending.
+  Lineage lives in `state.json positions[addr].lineage` (`pnl_factor`, `reshape_count`, `anchor_top_bin`, …).
+- **Swap guard**: `swapToken({ max_price_impact_pct })` refuses before signing; `swapBaseToSolWithRetry` splits
+  and queues leftovers in `state.json pendingSwaps`, swept by both management cycles (`sweepPendingSwaps`).
+- **Portfolio guard** (`modules/portfolio-runner.js`): equity = wallet + open positions (SOL by default), state in
+  `state.json portfolio`. `evaluatePortfolio` runs in both management cycles and (throttled, `portfolioGuardCheckSec`)
+  in the fast pollers; a kill-switch trip closes every position via `executeTool("close_position")`. The deploy gate is
+  `getDeployBlock()` in `runSafetyChecks(deploy_position)` + early skips in the screening paths. Manual
+  deposits/withdrawals need `cli.js guard --reset`.
+- **Regime gate** (`modules/regime-runner.js`): `regimeDeployGate()` in `runSafetyChecks(deploy_position)`; mode
+  `regimeGateMode` = off | log (default, flags `state.positions[addr].regime_flag` + decision-log `regime_flag`) |
+  enforce. Acute rules only by default; fail-open on missing market data. `cli.js regime` reports flagged vs normal.
+- **Smart Wallet Exit Watch** (`modules/wallet-exit-watch.js`): standalone stores `trigger_wallets` (their position +
+  shares) on the tracked position at entry; `refreshWalletExits` (throttled) feeds `wallet_exit_signal` into
+  annotate → exit Rule 6. Reshape copies `trigger_wallets` and `partial_tp` to the new position.
+- **Partial TP**: `partial_close_position` tool (WRITE, lock priority 8) → `withdrawLiquidity(bps)` + guarded swap;
+  progress in `state.positions[addr].partial_tp`. Pollers emit `PARTIAL_TP*` through `registerExitSignal`.
+  When `partialTpEnabled`, exit Rule 2 uses `partialTpFinalPct` instead of `takeProfitPct`.
+- **RPC failover** (`modules/rpc-health.js`): endpoints = RPC_URL + `rpc-endpoints.json` (gitignored, hot-reloaded)
+  + RPC_URLS + FALLBACK_RPC_URL. `rpcConnection()` (dlmm/wallet/pnl) and `standalone/rpc.js#readRpc` use
+  `trackedFetch`, which reports every request: 429 → cooldown + rotate, repeated 5xx/network → cooldown + rotate.
+  Never log endpoint URLs (API keys) — names only. Safe mode (`isRpcSafeMode`) blocks deploy and reshape.
+  `rpc-endpoints.json` is the single RPC config: `config.js` derives RPC_URL (+ MONITOR_WS_URL) from its first entry
+  when unset (`RPC_URL_FROM_FILE=1`, so rpc-health doesn't list it twice). Entries support `ws`, `env:VAR` values,
+  `provider` presets (helius/alchemy) + `apiKey`, `{apiKey}` placeholders and `apiKeyParam`
+  (`modules/rpc-endpoints-file.js`); HELIUS_API_KEY is derived from the first helius entry when unset. The standalone `WalletMonitor` websocket follows the failover via
+  `onRpcSwitch` (re-subscribe + reconcile backfill) unless a dedicated MONITOR_RPC_URL is set.
+- **Dump history persistence**: `enableHistoryPersistence(repoPath("dump-history.json"))` in both runtimes' start.
+- Tests: `npm run test:op` (pure, no network).
+
 ## Known issues / tech debt (verified by reading the code)
 
 - **`lessons.js evolveThresholds()`** evolves `minOrganic` and `minFeeActiveTvlRatio` only.

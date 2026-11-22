@@ -9,15 +9,22 @@ import fs from "node:fs";
 import { config, computeDeployAmount } from "../config.js";
 import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
-import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
+import { sendMessage as tgSend, isEnabled as tgEnabled, notifyAlert } from "../telegram.js";
 import { MonitorStore, finishSignal } from "./store.js";
 import { WalletMonitor } from "./monitor.js";
 import { screenMint, poolDetail } from "./screening.js";
-import { exposureStillPresent } from "./events.js";
+import { exposureStillPresent, positionSnapshot } from "./events.js";
+import { fetchJson } from "./rpc.js";
+import { refreshWalletExits } from "../modules/wallet-exit-watch.js";
 import { getMyPositions } from "../tools/dlmm.js";
-import { executeTool } from "../tools/executor.js";
+import { executeTool, sweepPendingSwaps, portfolioNotify } from "../tools/executor.js";
+import { evaluatePortfolio, getDeployBlock } from "../modules/portfolio-runner.js";
+import { maybeReshape } from "../modules/reshape-runner.js";
+import { partialTpSignal, markPartialAttempt } from "../modules/partial-tp-runner.js";
+import { enableHistoryPersistence, flushHistory } from "../modules/dump-detector.js";
+import { startRpcHealthMonitor } from "../modules/rpc-health.js";
 import { getWalletBalances } from "../tools/wallet.js";
-import { getTrackedPositions, confirmPeak, updatePnlAndCheckExits, registerExitSignal, syncOpenPositions } from "../state.js";
+import { getTrackedPositions, confirmPeak, updatePnlAndCheckExits, registerExitSignal, syncOpenPositions, setTriggerWallets } from "../state.js";
 import { recordPositionSnapshot } from "../pool-memory.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 
@@ -103,6 +110,11 @@ async function attemptEntry(signal) {
     finishSignal(store, signal, "portfolio full");
     return null;
   }
+  const guardBlock = getDeployBlock();
+  if (guardBlock) {
+    finishSignal(store, signal, `portfolio guard: ${guardBlock}`);
+    return null;
+  }
 
   // Focused screening: this mint and its eligible pools only.
   let screened;
@@ -167,6 +179,8 @@ async function attemptEntry(signal) {
     record.txs = result.txs ?? [];
     record.amountSol = amountY;
     store.save();
+    // Smart Wallet Exit Watch: remember whose conviction we followed (their positions + shares).
+    if (!result.dry_run && result.position) setTriggerWallets(result.position, signal.events);
     finishSignal(store, signal, record.status === "proposed" ? "shadow proposal recorded" : "entered");
     const label = result.dry_run ? "[SHADOW] Would deploy" : "Deployed";
     log("entry", `${label} ${amountY} SOL → pool ${pool.pool_address.slice(0, 8)} mint ${mint.slice(0, 8)} (${binsBelow} bins below, ${signal.events.length}-wallet convergence)`);
@@ -211,6 +225,15 @@ async function finalRecheck(signal, screened) {
 
 // ─── Exits (deterministic, no LLM) ──────────────────────────────────────────
 
+const walletExitDeps = {
+  snapshot: (position, wallet, pool) => positionSnapshot(position, wallet, pool),
+  walletPools: async (wallet) => {
+    const portfolio = await fetchJson(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}`);
+    if (!Array.isArray(portfolio?.pools)) throw new Error("unexpected portfolio response");
+    return portfolio.pools.map(p => p.poolAddress);
+  },
+};
+
 // One management pass: trailing/rule exits and fee claims. Never triggers
 // screening — an empty portfolio just waits for the next convergence signal.
 export async function manageOnce() {
@@ -223,6 +246,15 @@ export async function manageOnce() {
       return null;
     }
     syncOpenPositions(live.positions.map(p => p.position));
+    // Meridian-OP: retry base tokens the swap guard left unsold (not ones still in a position).
+    await sweepPendingSwaps({ openBaseMints: live.positions.map(p => p.base_mint).filter(Boolean) })
+      .catch(e => log("manage_warn", `Pending swap sweep failed: ${e.message}`));
+    await refreshWalletExits(live.positions, walletExitDeps)
+      .catch(e => log("manage_warn", `Wallet exit watch failed: ${e.message}`));
+    // Meridian-OP portfolio guard: daily loss limit + kill switch (closes all on trip).
+    const guard = await evaluatePortfolio({ positions: live.positions, getWalletBalances, executeTool, notify: portfolioNotify })
+      .catch(e => { log("manage_warn", `Portfolio guard failed: ${e.message}`); return null; });
+    if (guard?.closed?.length) return `Kill switch: closed ${guard.closed.filter(c => c.ok).length}/${guard.closed.length} position(s)`;
     if (live.positions.length === 0) return "No open positions";
     for (const p of live.positions) {
       recordPositionSnapshot(p.pool, p);
@@ -263,6 +295,18 @@ function startPnlPoller() {
     try {
       const live = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!live?.positions?.length) return;
+      // Smart Wallet Exit Watch (throttled). Its verdict reaches exit Rule 6 on the next fresh read.
+      void refreshWalletExits(live.positions, walletExitDeps).catch(e => log("poll", `Wallet exit watch failed: ${e.message}`));
+      // Portfolio guard between management cycles (throttled; closes all on kill switch).
+      manageBusy = true;
+      let guard = null;
+      try {
+        guard = await evaluatePortfolio({
+          positions: live.positions, getWalletBalances, executeTool, notify: portfolioNotify,
+          minIntervalMs: Math.max(10, Number(config.management.portfolioGuardCheckSec ?? 60)) * 1000,
+        }).catch(e => { log("poll", `Portfolio guard failed: ${e.message}`); return null; });
+      } finally { manageBusy = false; }
+      if (guard?.closed?.length) return;
       for (const p of live.positions) {
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
@@ -270,9 +314,35 @@ function startPnlPoller() {
         let signal = null, reason = null;
         if (exit) { signal = exit.action ?? "EXIT"; reason = exit.reason; }
         else if (closeRule) { signal = `RULE_${closeRule.rule}`; reason = closeRule.reason; }
+        // Meridian-OP partial TP: takes a slice, confirmed like an exit.
+        const partial = signal ? null : partialTpSignal(p);
+        if (partial) { signal = partial.signal; reason = partial.reason; }
         const { fire } = registerExitSignal(p.position, signal, confirmTicks);
-        if (!signal || !fire) continue;
+        if (!signal) {
+          // Meridian-OP: no exit pending — slow downtrend may warrant a reshape.
+          manageBusy = true;
+          let reshaped = null;
+          try { reshaped = await maybeReshape(p, { hasExitSignal: false, executeTool }); }
+          finally { manageBusy = false; }
+          if (reshaped) break; // one action per tick
+          continue;
+        }
+        if (!fire) continue;
+        if (partial) {
+          log("poll", `Partial TP confirmed (${confirmTicks} ticks): ${p.pair ?? p.position.slice(0, 8)} — ${reason}`);
+          manageBusy = true;
+          try {
+            const res = await executeTool("partial_close_position", partial.args).catch(e => ({ error: e.message }));
+            const ok = res?.success === true || res?.dry_run === true;
+            markPartialAttempt(p.position, ok);
+            log("poll", `${p.pair ?? p.position.slice(0, 8)}: partial TP ${ok ? "done" : `FAILED — ${res?.error || res?.reason || "unknown"}`}`);
+          } finally {
+            manageBusy = false;
+          }
+          break; // one action per tick
+        }
         log("poll", `Exit confirmed (${confirmTicks} ticks): ${p.pair ?? p.position.slice(0, 8)} — ${reason} — closing`);
+        if (/emergency/i.test(reason || "")) notifyAlert("EMERGENCY_SL", `${p.pair ?? p.position.slice(0, 8)}: ${reason} — PnL ${p.pnl_pct}% | signals ${JSON.stringify(p.dump_signals ?? {})}`).catch(() => {});
         manageBusy = true; // hold the slow cycle off this position
         try {
           const res = await executeTool("close_position", { position_address: p.position, reason }).catch(e => ({ error: e.message }));
@@ -323,12 +393,16 @@ async function shutdown(signalName) {
   for (const timer of Object.values(timers)) clearInterval(timer);
   try { await monitor?.stop(); } catch { /* best-effort */ }
   try { if (lockPath) fs.rmSync(lockPath, { force: true }); } catch { /* best-effort */ }
+  flushHistory(Date.now(), true);
   process.exit(0);
 }
 
 export async function startStandalone() {
-  if (!config.standalone.monitorRpcUrl) throw new Error("Standalone requires RPC_URL or MONITOR_RPC_URL");
+  if (!config.standalone.monitorRpcUrl) throw new Error("Standalone needs an RPC: add endpoints to rpc-endpoints.json (or set RPC_URL / MONITOR_RPC_URL)");
   acquireLock();
+  startRpcHealthMonitor({ notify: portfolioNotify });
+  const restored = enableHistoryPersistence(repoPath("dump-history.json"));
+  if (restored) log("runtime", `Dump detector: restored ${restored} price ticks from before restart`);
 
   store = new MonitorStore();
   for (const [mint, attempt] of Object.entries(store.data.attempts)) {

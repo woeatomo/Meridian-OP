@@ -197,6 +197,133 @@ export function recordClose(position_address, reason) {
 }
 
 /**
+ * Meridian-OP reshape lineage. Attach lineage to a freshly tracked position and carry
+ * over trailing-TP state (peak + trailing flag) from the position it replaced, so the
+ * chained PnL keeps its peak instead of re-arming from zero.
+ */
+export function setPositionLineage(position_address, lineage, carry = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+  pos.lineage = {
+    root_position: lineage.root_position ?? null,
+    previous_position: lineage.previous_position ?? null,
+    initial_value_usd: lineage.initial_value_usd ?? null,
+    started_at: lineage.started_at ?? pos.deployed_at,
+    pnl_factor: Number.isFinite(Number(lineage.pnl_factor)) ? Number(lineage.pnl_factor) : 1,
+    reshape_count: lineage.reshape_count ?? 1,
+    anchor_top_bin: lineage.anchor_top_bin ?? null,
+    last_reshape_at: lineage.last_reshape_at ?? new Date().toISOString(),
+    last_reshape_bin: lineage.last_reshape_bin ?? null,
+  };
+  pos.rebalance_count = pos.lineage.reshape_count;
+  if (carry.peak_pnl_pct != null) pos.peak_pnl_pct = carry.peak_pnl_pct;
+  if (carry.trailing_active != null) pos.trailing_active = !!carry.trailing_active;
+  pushEvent(state, { action: "reshape", position: position_address, pool_name: pos.pool_name || pos.pool, reason: `reshape #${pos.lineage.reshape_count}` });
+  save(state);
+  log("state", `Position ${position_address} lineage set: reshape #${pos.lineage.reshape_count}, pnl_factor ${pos.lineage.pnl_factor.toFixed(4)}`);
+  return true;
+}
+
+/** Meridian-OP partial TP progress: { tp1_done, tp2_done, withdrawn_fraction, history[] }. */
+export function setPartialTpState(position_address, patch) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || !patch) return null;
+  const prev = pos.partial_tp || { tp1_done: false, tp2_done: false, withdrawn_fraction: 0, history: [] };
+  pos.partial_tp = {
+    tp1_done: patch.tp1_done ?? prev.tp1_done,
+    tp2_done: patch.tp2_done ?? prev.tp2_done,
+    withdrawn_fraction: Number.isFinite(Number(patch.withdrawn_fraction)) ? Number(patch.withdrawn_fraction) : prev.withdrawn_fraction,
+    history: Array.isArray(patch.history) ? patch.history.slice(-10) : prev.history,
+  };
+  save(state);
+  return pos.partial_tp;
+}
+
+/**
+ * Meridian-OP Smart Wallet Exit Watch: the trigger wallets (and THEIR DLMM positions)
+ * whose convergence caused this entry. Values are base58 addresses / numeric strings.
+ */
+export function setTriggerWallets(position_address, triggers) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || !Array.isArray(triggers) || !triggers.length) return false;
+  const addr = (v) => (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(v || "")) ? String(v) : null);
+  pos.trigger_wallets = triggers
+    .map((t) => ({
+      wallet: addr(t.wallet),
+      position: addr(t.position),
+      pool: addr(t.pool),
+      shares: /^\d+$/.test(String(t.shares ?? "")) ? String(t.shares) : null,
+    }))
+    .filter((t) => t.wallet && t.position && t.pool && t.shares)
+    .slice(0, 10);
+  save(state);
+  return pos.trigger_wallets.length > 0;
+}
+
+/** Meridian-OP regime gate (log-only): remember that a position was opened in a "bad" regime. */
+export function setPositionRegimeFlag(position_address, flag) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || !flag) return false;
+  pos.regime_flag = {
+    mode: flag.mode ?? "log",
+    reason: sanitizeStoredText(flag.reason, 200),
+    at: flag.at ?? new Date().toISOString(),
+    sol_24h: flag.sol_24h ?? null,
+    btc_1h: flag.btc_1h ?? null,
+  };
+  save(state);
+  return true;
+}
+
+// ─── Portfolio guard state (Meridian-OP daily loss + kill switch) ──
+// { day, day_start_equity, peak_equity, last_equity, last_at, unit,
+//   day_blocked, day_blocked_reason, kill_switch_until, kill_switch_reason, alerts: {key: iso} }
+
+export function getPortfolioState() {
+  return load().portfolio || {};
+}
+
+export function savePortfolioState(patch) {
+  const state = load();
+  state.portfolio = { ...(state.portfolio || {}), ...patch };
+  save(state);
+  return state.portfolio;
+}
+
+// ─── Pending swaps (Meridian-OP swap guard) ────────────────────
+// Base tokens left in the wallet because the swap guard blocked (price impact
+// too high) or Jupiter failed. The management cycle retries them.
+
+export function addPendingSwap(mint, reason) {
+  if (!mint) return;
+  const state = load();
+  state.pendingSwaps = state.pendingSwaps || {};
+  const prev = state.pendingSwaps[mint];
+  state.pendingSwaps[mint] = {
+    reason: sanitizeStoredText(reason, 120),
+    first_at: prev?.first_at || new Date().toISOString(),
+    last_at: new Date().toISOString(),
+    attempts: (prev?.attempts ?? 0) + 1,
+  };
+  save(state);
+}
+
+export function clearPendingSwap(mint) {
+  const state = load();
+  if (!state.pendingSwaps?.[mint]) return;
+  delete state.pendingSwaps[mint];
+  save(state);
+}
+
+export function getPendingSwaps() {
+  return load().pendingSwaps || {};
+}
+
+/**
  * Set a persistent instruction for a position (e.g. "hold until 5% profit").
  * Overwrites any previous instruction. Pass null to clear.
  */
@@ -408,7 +535,13 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Out of range too long ──────────────────────────────────────
-  if (pos.out_of_range_since) {
+  // Meridian-OP: hanya OOR KIRI (harga di bawah range = posisi penuh token) yang ditutup
+  // ketat setelah outOfRangeWaitMinutes. OOR KANAN (harga di atas range = posisi penuh SOL)
+  // diserahkan ke exit-rules Rule 3/4 (close bila PnL >= 0, HOLD bila minus sampai
+  // oorRightMaxWaitMinutes / oorRightMaxBinsAbove). Arah tak diketahui -> perilaku lama (ketat).
+  const { active_bin, upper_bin } = positionData;
+  const isOorRight = active_bin != null && upper_bin != null && active_bin > upper_bin;
+  if (pos.out_of_range_since && !isOorRight) {
     const minutesOOR = Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000);
     if (minutesOOR >= mgmtConfig.outOfRangeWaitMinutes) {
       return {

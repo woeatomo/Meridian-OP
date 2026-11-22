@@ -35,8 +35,18 @@ export function getDeterministicCloseRule(position, managementConfig) {
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
     return { action: "CLOSE", rule: 1, reason: "stop loss" };
   }
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
+  // With partial TP on, +takeProfitPct only takes a slice (modules/partial-tp.js); the
+  // full close moves up to partialTpFinalPct and the runner is otherwise left to trailing/SL.
+  const fullTpPct = managementConfig.partialTpEnabled === true
+    ? (managementConfig.partialTpFinalPct ?? 20)
+    : managementConfig.takeProfitPct;
+  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= fullTpPct) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
+  }
+  // Meridian-OP Rule 6: Smart Wallet Exit Watch — wallet pemicu entry sudah keluar.
+  // walletExitAction "log" hanya mencatat (lihat modules/wallet-exit-watch.js).
+  if (position.wallet_exit_signal === true && (managementConfig.walletExitAction ?? "close") === "close") {
+    return { action: "CLOSE", rule: 6, reason: position.wallet_exit_reason || "smart wallets exited" };
   }
   // Meridian-OP Rule 3: pump jauh di atas range, HANYA bila PnL >= 0.
   // PnL minus -> HOLD, tunggu balik masuk range. Guard: jarak > max = breakout, tutup.

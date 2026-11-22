@@ -1,5 +1,6 @@
 import fs from "fs";
 import { REPO_ROOT, repoPath } from "./repo-root.js";
+import { readEndpointsFile } from "./modules/rpc-endpoints-file.js";
 import { getScreeningDefaultsForTimeframe, normalizeTimeframe, scaleScreeningToTimeframe, TIMEFRAME_SCREENING_SCALES } from "./screening-scales.js";
 
 export { REPO_ROOT, repoPath, getScreeningDefaultsForTimeframe, normalizeTimeframe, scaleScreeningToTimeframe, TIMEFRAME_SCREENING_SCALES };
@@ -42,6 +43,23 @@ if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
 if (u.publicApiKey) process.env.PUBLIC_API_KEY ||= u.publicApiKey;
 if (u.agentMeridianApiUrl) process.env.AGENT_MERIDIAN_API_URL ||= u.agentMeridianApiUrl;
 if (u.telegramChatId) process.env.TELEGRAM_CHAT_ID ||= String(u.telegramChatId);
+
+// Meridian-OP: rpc-endpoints.json is the single place for RPC settings. When neither
+// .env nor user-config sets RPC_URL, the first enabled endpoint becomes RPC_URL (and its
+// "ws" the monitor websocket), so every module that reads RPC_URL keeps working.
+// modules/rpc-health.js then fails over across the whole list.
+{
+  const rpcFile = readEndpointsFile(repoPath("rpc-endpoints.json"));
+  if (rpcFile.error) console.warn(`[config] rpc-endpoints.json unreadable: ${rpcFile.error}`);
+  // Tools that still read HELIUS_API_KEY (e.g. the setup wizard) get the file's Helius key.
+  if (rpcFile.heliusApiKey && !process.env.HELIUS_API_KEY) process.env.HELIUS_API_KEY = rpcFile.heliusApiKey;
+  const first = rpcFile.list[0];
+  if (!process.env.RPC_URL && first) {
+    process.env.RPC_URL = first.url;
+    process.env.RPC_URL_FROM_FILE = "1";
+    if (first.ws && !process.env.MONITOR_WS_URL && !u.monitorWsUrl) process.env.MONITOR_WS_URL = first.ws;
+  }
+}
 
 const indicatorUserConfig = u.chartIndicators ?? {};
 
@@ -143,13 +161,73 @@ export const config = {
     // Meridian-OP: OOR kanan (pump di atas range) — guard untuk HOLD bila PnL minus.
     oorRightMaxWaitMinutes: u.oorRightMaxWaitMinutes ?? 240,
     oorRightMaxBinsAbove:   u.oorRightMaxBinsAbove   ?? 25,
-    // Meridian-OP: Reshape (modules/reshape-manager.js)
+    // Meridian-OP: Dump detector (modules/dump-detector.js) — 2 dari 3 sinyal = dump terkonfirmasi.
+    dumpPriceDropPct:       u.dumpPriceDropPct       ?? 5,   // sinyal A: harga turun >= X% ...
+    dumpPriceWindowMin:     u.dumpPriceWindowMin     ?? 15,  // ... dalam N menit
+    dumpBinDrop:            u.dumpBinDrop            ?? 8,   // sinyal B: active bin turun >= X bin ...
+    dumpBinWindowMin:       u.dumpBinWindowMin       ?? 10,  // ... dalam N menit
+    dumpRedCandles:         u.dumpRedCandles         ?? 3,   // sinyal C: N candle 5m merah ...
+    dumpVolumeMult:         u.dumpVolumeMult         ?? 2,   // ... + volume > X kali rata-rata
+    dumpSignalsRequired:    u.dumpSignalsRequired    ?? 2,
+    dumpMinHistoryMin:      u.dumpMinHistoryMin      ?? 2,   // riwayat minimal sebelum sinyal A/B dipercaya
+    // Meridian-OP: max Emergency SL per token per hari -> cooldown token.
+    emergencySlMaxPerTokenPerDay: u.emergencySlMaxPerTokenPerDay ?? 2,
+    emergencySlCooldownHours:     u.emergencySlCooldownHours     ?? 24,
+    // Meridian-OP: Reshape (modules/reshape-manager.js) — satu arah ke bawah, Spot -> Bid-Ask.
+    reshapeEnabled:         u.reshapeEnabled         ?? false,
+    reshapeStrategy:        u.reshapeStrategy        ?? "bid_ask",
     reshapeBins:            u.reshapeBins            ?? 5,
     reshapeCooldownMinutes: u.reshapeCooldownMinutes ?? 45,
     reshapeMaxPerPosition:  u.reshapeMaxPerPosition  ?? 3,
+    reshapeConfirmMinutes:  u.reshapeConfirmMinutes  ?? 2,   // kondisi reshape harus bertahan N menit (hysteresis)
+    reshapeReboundToleranceBins: u.reshapeReboundToleranceBins ?? 2, // > low 10 mnt + X bin = rebound, jangan reshape
+    reshapeMinPnlPct:       u.reshapeMinPnlPct       ?? -12, // di bawah ini biarkan SL yang memutuskan
+    reshapeCostUsd:         u.reshapeCostUsd         ?? 0.25,// estimasi biaya tx reshape (rent posisi kembali)
+    reshapeFeeCostMultiple: u.reshapeFeeCostMultiple ?? 2,   // fee posisi harus >= X * biaya reshape
+    reshapeMaxBinsAbove:    u.reshapeMaxBinsAbove    ?? 69,  // batas bin sisi token di atas harga
+    // Meridian-OP: Swap guard (modules/swap-guard.js)
+    maxSwapPriceImpactPct:  u.maxSwapPriceImpactPct  ?? 3,
+    swapMaxChunks:          u.swapMaxChunks          ?? 4,   // pecah swap sampai N bagian bila impact tinggi
+    relayCloseSlippageBps:  u.relayCloseSlippageBps  ?? 1000,// zap-out relay (dulu hardcode 5000 = 50%)
     // Meridian-OP: Portfolio guard (modules/portfolio-guard.js)
     dailyLossLimitPct:      u.dailyLossLimitPct      ?? -5,
     portfolioKillSwitchPct: u.portfolioKillSwitchPct ?? -10,
+    portfolioGuardEnabled:  u.portfolioGuardEnabled  ?? true,
+    portfolioGuardUnit:     u.portfolioGuardUnit     ?? "sol",  // "sol" | "usd" — ekuitas diukur dalam satuan ini
+    portfolioDayUtcOffsetHours: u.portfolioDayUtcOffsetHours ?? 7, // hari trading = WIB
+    portfolioGuardCheckSec: u.portfolioGuardCheckSec ?? 60,     // evaluasi dari poller maks tiap N detik
+    killSwitchPauseHours:   u.killSwitchPauseHours   ?? 24,
+    // Meridian-OP: Partial TP (modules/partial-tp.js). Saat aktif, TP penuh pindah ke partialTpFinalPct.
+    partialTpEnabled:       u.partialTpEnabled       ?? false,
+    partialTp1Pct:          u.partialTp1Pct          ?? 5,
+    partialTp1Fraction:     u.partialTp1Fraction     ?? 0.5,
+    partialTp2Pct:          u.partialTp2Pct          ?? 10,
+    partialTp2Fraction:     u.partialTp2Fraction     ?? 0.25,
+    partialTpFinalPct:      u.partialTpFinalPct      ?? 20,
+    // Meridian-OP: Smart Wallet Exit Watch (modules/wallet-exit-watch.js) — standalone entries.
+    walletExitWatchEnabled: u.walletExitWatchEnabled ?? true,
+    walletExitAction:       u.walletExitAction       ?? "close", // "close" | "log"
+    walletExitMinWallets:   u.walletExitMinWallets   ?? 2,
+    walletExitShareDropPct: u.walletExitShareDropPct ?? 50,
+    walletExitCheckSec:     u.walletExitCheckSec     ?? 60,
+    // Meridian-OP: RPC failover (modules/rpc-health.js). Cadangan = FALLBACK_RPC_URL / fallbackRpcUrl.
+    rpcHealthCheckSec:        u.rpcHealthCheckSec        ?? 15,
+    rpcFailoverAfterFailures: u.rpcFailoverAfterFailures ?? 2,
+    rpcFailbackAfterOk:       u.rpcFailbackAfterOk       ?? 3,
+    rpcSafeModeSec:           u.rpcSafeModeSec           ?? 60,
+    rpcProbeTimeoutMs:        u.rpcProbeTimeoutMs        ?? 8000,
+    rpcProbeOthersEvery:      u.rpcProbeOthersEvery      ?? 4,    // probe endpoint cadangan tiap N tick (hemat kredit)
+    rpcPreferPrimary:         u.rpcPreferPrimary         ?? true, // kembali ke RPC_URL setelah sehat lagi
+    rpcRateLimitCooldownSec:  u.rpcRateLimitCooldownSec  ?? 60,   // HTTP 429 -> istirahatkan endpoint
+    rpcErrorThreshold:        u.rpcErrorThreshold        ?? 3,    // error 5xx/timeout dalam window -> pindah
+    rpcErrorWindowSec:        u.rpcErrorWindowSec        ?? 30,
+    rpcErrorCooldownSec:      u.rpcErrorCooldownSec      ?? 120,
+    // Meridian-OP: Regime gate (modules/regime-runner.js) — "off" | "log" | "enforce".
+    regimeGateMode:         u.regimeGateMode         ?? "log",
+    regimeSol24hDropPct:    u.regimeSol24hDropPct    ?? -10,
+    regimeBtc1hDropPct:     u.regimeBtc1hDropPct     ?? -5,
+    regimeUseTrendRule:     u.regimeUseTrendRule     ?? false, // EMA200 trend rule (bisa blok berminggu-minggu)
+    regimeCheckSec:         u.regimeCheckSec         ?? 300,   // cache data market
     maxHoldMinutes:         u.maxHoldMinutes         ?? 2880,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close

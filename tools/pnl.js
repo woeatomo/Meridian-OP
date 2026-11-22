@@ -1,5 +1,6 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import { config } from "../config.js";
+import { rpcConnection } from "../modules/rpc-health.js";
 import { log } from "../logger.js";
 import {
   getTrackedPosition,
@@ -34,6 +35,8 @@ async function loadDlmmSdk() {
 
 let _pnlConnection = null;
 export function getPnlConnection() {
+  // Same endpoint as RPC_URL -> follow the failover; a dedicated PNL_RPC_URL stays as-is.
+  if (config.pnl.rpcUrl && config.pnl.rpcUrl === process.env.RPC_URL) return rpcConnection("confirmed");
   if (!_pnlConnection) {
     _pnlConnection = new Connection(config.pnl.rpcUrl, "confirmed");
   }

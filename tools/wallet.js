@@ -9,13 +9,15 @@ import bs58 from "bs58";
 import { rpcBalances, priceBalances } from "../standalone/balances.js";
 import { log } from "../logger.js";
 import { config } from "../config.js";
+import { swapGuard } from "../modules/swap-guard.js";
+import { rpcConnection } from "../modules/rpc-health.js";
 
 let _connection = null;
 let _wallet = null;
 
 function getConnection() {
-  if (!_connection) _connection = new Connection(process.env.RPC_URL, "confirmed");
-  return _connection;
+  // Meridian-OP: active endpoint from the RPC health monitor (primary / fallback).
+  return rpcConnection("confirmed");
 }
 
 function getWallet() {
@@ -84,10 +86,26 @@ export function normalizeMint(mint) {
   return mint;
 }
 
+/**
+ * Price impact (in percent, absolute) from a Jupiter order/quote response.
+ * Newer Ultra responses carry `priceImpact` already in percent; classic v6-style
+ * quotes carry `priceImpactPct` as a FRACTION string ("0.0123" = 1.23%).
+ * Returns null when the response has neither.
+ */
+export function parseOrderPriceImpactPct(order) {
+  if (!order) return null;
+  const pct = Number(order.priceImpact);
+  if (order.priceImpact != null && Number.isFinite(pct)) return Math.abs(pct);
+  const frac = Number(order.priceImpactPct);
+  if (order.priceImpactPct != null && Number.isFinite(frac)) return Math.abs(frac * 100);
+  return null;
+}
+
 export async function swapToken({
   input_mint,
   output_mint,
   amount,
+  max_price_impact_pct = null, // Meridian-OP swap guard: refuse (before signing) above this impact
 }) {
   input_mint  = normalizeMint(input_mint);
   output_mint = normalizeMint(output_mint);
@@ -141,6 +159,16 @@ export async function swapToken({
       throw new Error(`Swap V2 order error: ${order.errorMessage || order.errorCode}`);
     }
 
+    // ─── Swap guard: price impact check before signing ─────────
+    const priceImpactPct = parseOrderPriceImpactPct(order);
+    if (max_price_impact_pct != null && Number.isFinite(Number(max_price_impact_pct))) {
+      const guard = swapGuard({ priceImpactPct, maxPriceImpactPct: Number(max_price_impact_pct) });
+      if (!guard.allow) {
+        log("swap_warn", `Swap guard blocked ${input_mint.slice(0, 8)} → ${output_mint.slice(0, 8)}: ${guard.reason}`);
+        return { success: false, blocked: true, reason: guard.reason, price_impact_pct: priceImpactPct, input_mint, output_mint };
+      }
+    }
+
     const { transaction: unsignedTx, requestId } = order;
 
     // ─── Deserialize and sign ─────────────────────────────────
@@ -184,6 +212,7 @@ export async function swapToken({
       referral_account: referralParams?.referralAccount || null,
       referral_fee_bps_requested: referralParams?.referralFee || 0,
       fee_bps_applied: order.feeBps ?? null,
+      price_impact_pct: priceImpactPct,
       fee_mint: order.feeMint ?? null,
     };
   } catch (error) {

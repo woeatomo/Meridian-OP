@@ -10,7 +10,14 @@ import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
-import { executeTool, registerCronRestarter } from "./tools/executor.js";
+import { executeTool, registerCronRestarter, sweepPendingSwaps, portfolioNotify } from "./tools/executor.js";
+import { evaluatePortfolio, getDeployBlock, formatGuardStatus, resetGuardNow } from "./modules/portfolio-runner.js";
+import { getRegimeMetrics, formatRegimeReport } from "./modules/regime-runner.js";
+import { regimeGate } from "./modules/regime-gate.js";
+import { maybeReshape } from "./modules/reshape-runner.js";
+import { partialTpSignal, markPartialAttempt } from "./modules/partial-tp-runner.js";
+import { enableHistoryPersistence, flushHistory } from "./modules/dump-detector.js";
+import { startRpcHealthMonitor, formatRpcStatus } from "./modules/rpc-health.js";
 import {
   startPolling,
   stopPolling,
@@ -23,6 +30,7 @@ import {
   notifyOutOfRange,
   isEnabled as telegramEnabled,
   createLiveMessage,
+  notifyAlert,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal } from "./state.js";
@@ -235,6 +243,18 @@ export async function runManagementCycle({ silent = false } = {}) {
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
+    // Meridian-OP: retry base tokens the swap guard left unsold (not ones still in a position).
+    if (livePositions && !livePositions.error) {
+      await sweepPendingSwaps({ openBaseMints: positions.map((p) => p.base_mint).filter(Boolean) })
+        .catch((e) => log("cron_warn", `Pending swap sweep failed: ${e.message}`));
+      // Meridian-OP portfolio guard: daily loss limit + kill switch (closes all on trip).
+      const guard = await evaluatePortfolio({ positions, getWalletBalances, executeTool, notify: portfolioNotify })
+        .catch((e) => { log("cron_warn", `Portfolio guard failed: ${e.message}`); return null; });
+      if (guard?.closed?.length) {
+        mgmtReport = `🚨 Kill switch: closed ${guard.closed.filter((c) => c.ok).length}/${guard.closed.length} position(s). ${guard.reason}`;
+        return mgmtReport;
+      }
+    }
 
     if (positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");
@@ -381,6 +401,14 @@ export async function runScreeningCycle({ silent = false } = {}) {
         summary: "Screening skipped",
         reason: `Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`,
       });
+      _screeningBusy = false;
+      return screenReport;
+    }
+    const guardBlock = getDeployBlock();
+    if (guardBlock) {
+      log("cron", `Screening skipped — portfolio guard: ${guardBlock}`);
+      screenReport = `Screening skipped — portfolio guard: ${guardBlock}.`;
+      appendDecision({ type: "skip", actor: "SCREENER", summary: "Screening skipped", reason: `Portfolio guard: ${guardBlock}` });
       _screeningBusy = false;
       return screenReport;
     }
@@ -732,6 +760,16 @@ Summarize the current portfolio health, total fees earned, and performance of al
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions?.length) return;
+      // Portfolio guard between management cycles (throttled; closes all on kill switch).
+      _managementBusy = true;
+      let guard = null;
+      try {
+        guard = await evaluatePortfolio({
+          positions: result.positions, getWalletBalances, executeTool, notify: portfolioNotify,
+          minIntervalMs: Math.max(10, Number(config.management.portfolioGuardCheckSec ?? 60)) * 1000,
+        }).catch((e) => { log("cron_warn", `Portfolio guard failed: ${e.message}`); return null; });
+      } finally { _managementBusy = false; }
+      if (guard?.closed?.length) return;
       for (const p of result.positions) {
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
 
@@ -741,12 +779,39 @@ Summarize the current portfolio health, total fees earned, and performance of al
         let signal = null, reason = null, rule = "exit";
         if (exit) { signal = exit.action; reason = exit.reason; }
         else if (closeRule) { signal = `RULE_${closeRule.rule}`; reason = closeRule.reason; rule = closeRule.rule; }
+        // Meridian-OP partial TP: takes a slice, confirmed like an exit.
+        const partial = signal ? null : partialTpSignal(p);
+        if (partial) { signal = partial.signal; reason = partial.reason; }
 
         // Require N consecutive confirming ticks before acting.
         const { fire } = registerExitSignal(p.position, signal, confirmTicks);
-        if (!signal || !fire) continue;
+        if (!signal) {
+          // Meridian-OP: no exit pending — slow downtrend may warrant a reshape.
+          _managementBusy = true;
+          let reshaped = null;
+          try { reshaped = await maybeReshape(p, { hasExitSignal: false, executeTool }); }
+          finally { _managementBusy = false; }
+          if (reshaped) break; // one action per tick
+          continue;
+        }
+        if (!fire) continue;
+
+        if (partial) {
+          log("state", `[PnL poll] ${signal} confirmed (${confirmTicks} ticks): ${p.pair} — ${reason}`);
+          _managementBusy = true;
+          try {
+            const res = await executeTool("partial_close_position", partial.args).catch((e) => ({ error: e.message }));
+            const ok = res?.success === true || res?.dry_run === true;
+            markPartialAttempt(p.position, ok);
+            log("state", `[PnL poll] ${p.pair}: partial TP ${ok ? "done" : `FAILED — ${res?.error || res?.reason || "unknown"}`}`);
+          } finally {
+            _managementBusy = false;
+          }
+          break; // one action per tick
+        }
 
         log("state", `[PnL poll] ${signal} confirmed (${confirmTicks} ticks): ${p.pair} — ${reason} — closing directly`);
+        if (/emergency/i.test(reason || "")) notifyAlert("EMERGENCY_SL", `${p.pair}: ${reason} — PnL ${p.pnl_pct}% | signals ${JSON.stringify(p.dump_signals ?? {})}`).catch(() => {});
         // Hold the management lock so the cron cycle can't double-act on this position.
         _managementBusy = true;
         try {
@@ -853,6 +918,7 @@ async function shutdown(signal) {
     return;
   }
   _shuttingDown = true;
+  flushHistory(Date.now(), true);
 
   log("shutdown", `Received ${signal}. Shutting down...`);
   stopPolling();
@@ -1239,6 +1305,11 @@ function formatHelpText() {
     "/candidates — show latest cached candidates",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
+    "/guard — portfolio guard status (daily loss / kill switch)",
+    "/regime — regime gate status + would-block vs normal deploy results",
+    "/rpc — RPC endpoints status (active, cooling, errors)",
+    "/guard reset — re-baseline equity after a manual deposit/withdraw",
+    "/guard reset kill — also clear an active kill switch",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
@@ -1364,6 +1435,36 @@ async function telegramHandler(msg) {
       sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
     } else {
       sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/rpc") {
+    await sendMessage(formatRpcStatus()).catch(() => {});
+    return;
+  }
+
+  if (text === "/regime") {
+    try {
+      const m = await getRegimeMetrics({ force: true });
+      const g = regimeGate(m, config.management);
+      await sendMessage(`Now: ${g.allow ? "OK" : "WOULD BLOCK"} — ${g.reason}\n${formatRegimeReport()}`);
+    } catch (e) {
+      await sendMessage(`Regime error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/guard" || text.startsWith("/guard ")) {
+    try {
+      const arg = text.slice(6).trim().toLowerCase();
+      if (arg === "reset" || arg === "reset kill") {
+        await sendMessage(await resetGuardNow({ getMyPositions, getWalletBalances, clearKill: arg === "reset kill" }));
+      } else {
+        await sendMessage(formatGuardStatus());
+      }
+    } catch (e) {
+      await sendMessage(`Guard error: ${e.message}`).catch(() => {});
     }
     return;
   }
@@ -1979,6 +2080,9 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
 
 export function startLegacy() {
   ensureAgentId();
+  startRpcHealthMonitor({ notify: portfolioNotify });
+  const restored = enableHistoryPersistence(repoPath("dump-history.json"));
+  if (restored) log("startup", `Dump detector: restored ${restored} price ticks from before restart`);
   bootstrapHiveMind().catch(e => log("hivemind_warn", e.message));
   startHiveMindBackgroundSync();
   startCronJobs();

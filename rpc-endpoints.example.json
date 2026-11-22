@@ -1,0 +1,11 @@
+{
+  "_comment": "Satu-satunya tempat setting RPC + API key. Salin ke rpc-endpoints.json (sudah di .gitignore, chmod 600 — jangan di-commit / dibagikan). Urutan = prioritas: endpoint pertama = utama, sisanya cadangan; bot pindah otomatis saat 429 / error berulang / health check gagal, file dibaca ulang tanpa restart. RPC_URL / HELIUS_API_KEY di .env dan rpcUrl di user-config.json TIDAK perlu diisi. Cara isi: (1) provider 'helius' / 'alchemy' + apiKey -> URL & websocket dibuat otomatis; (2) provider lain: url (+ ws) dengan {apiKey} di tempat key-nya; (3) apiKeyParam: tambahkan key sebagai query param ke url biasa. apiKey boleh 'env:NAMA' (diambil dari .env). Campur provider berbeda agar satu provider down tidak mematikan semuanya.",
+  "endpoints": [
+    { "name": "helius",    "provider": "helius",  "apiKey": "YOUR_HELIUS_API_KEY" },
+    { "name": "alchemy",   "provider": "alchemy", "apiKey": "YOUR_ALCHEMY_API_KEY" },
+    { "name": "quicknode", "url": "https://YOUR-ENDPOINT.solana-mainnet.quiknode.pro/{apiKey}/",
+                           "ws":  "wss://YOUR-ENDPOINT.solana-mainnet.quiknode.pro/{apiKey}/",
+                           "apiKey": "YOUR_QUICKNODE_TOKEN" },
+    { "name": "public",    "url": "https://api.mainnet-beta.solana.com", "enabled": false }
+  ]
+}

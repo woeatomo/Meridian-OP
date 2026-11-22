@@ -243,6 +243,10 @@ const { values: flags } = parseArgs({
     wallet:     { type: "string" },
     timeframe:  { type: "string" },
     reason:     { type: "string" },
+    address:    { type: "string" },
+    name:       { type: "string" },
+    category:   { type: "string" },
+    type:       { type: "string" },
     "bins-below": { type: "string" },
     "bins-above": { type: "string" },
     "amount-x":   { type: "string" },
@@ -651,6 +655,73 @@ switch (subcommand) {
       pool_address: flags.pool,
       bps: flags.bps ? parseInt(flags.bps) : 10000,
       claim_fees: !argv.includes("--no-claim"),
+    }));
+    break;
+  }
+
+  // ── wallets (smart wallets for the standalone entry signal) ────
+  case "wallets": {
+    const { listSmartWallets, addSmartWallet, removeSmartWallet } = await import("./smart-wallets.js");
+    const action = argv.find((a, i) => i > 0 && !a.startsWith("-") && a !== "wallets") || "list";
+    if (action === "add") {
+      if (!flags.address) die("Usage: meridian wallets add --address <ADDR> --name <NAME> [--type lp|holder] [--category alpha]");
+      out(addSmartWallet({ address: flags.address, name: flags.name || flags.address.slice(0, 6), category: flags.category || "alpha", type: flags.type || "lp" }));
+    } else if (action === "remove") {
+      if (!flags.address) die("Usage: meridian wallets remove --address <ADDR>");
+      out(removeSmartWallet({ address: flags.address }));
+    } else {
+      out(listSmartWallets());
+    }
+    break;
+  }
+
+  // ── rpc (Meridian-OP RPC endpoints health) ────────────────────
+  case "rpc": {
+    const { checkRpcHealth, formatRpcStatus } = await import("./modules/rpc-health.js");
+    await checkRpcHealth();
+    // Probe every endpoint once so the report is complete (cheap: one getSlot each).
+    const { config } = await import("./config.js");
+    config.management.rpcProbeOthersEvery = 1;
+    await checkRpcHealth();
+    console.log(formatRpcStatus());
+    break;
+  }
+
+  // ── regime (Meridian-OP regime gate report) ───────────────────
+  case "regime": {
+    const { getRegimeMetrics, formatRegimeReport } = await import("./modules/regime-runner.js");
+    const { regimeGate } = await import("./modules/regime-gate.js");
+    const { config } = await import("./config.js");
+    const m = await getRegimeMetrics({ force: true });
+    const g = regimeGate(m, config.management);
+    console.log(`Now: ${g.allow ? "OK" : "WOULD BLOCK"} — ${g.reason}`);
+    console.log(formatRegimeReport());
+    break;
+  }
+
+  // ── guard (Meridian-OP portfolio guard) ───────────────────────
+  case "guard": {
+    const { formatGuardStatus, resetGuardNow } = await import("./modules/portfolio-runner.js");
+    const reset = argv.includes("--reset");
+    if (reset) {
+      const { getMyPositions } = await import("./tools/dlmm.js");
+      const { getWalletBalances } = await import("./tools/wallet.js");
+      console.log(await resetGuardNow({ getMyPositions, getWalletBalances, clearKill: argv.includes("--clear-kill") }));
+    } else {
+      console.log(formatGuardStatus());
+    }
+    break;
+  }
+
+  // ── reshape (Meridian-OP) ──────────────────────────────────────
+  case "reshape": {
+    if (!flags.position) die("Usage: meridian reshape --position <addr> [--strategy bid_ask|spot|curve] [--force]");
+    const { executeTool } = await import("./tools/executor.js");
+    out(await executeTool("reshape_position", {
+      position_address: flags.position,
+      strategy: flags.strategy || undefined,
+      reason: "manual reshape (CLI)",
+      force: argv.includes("--force"),
     }));
     break;
   }
