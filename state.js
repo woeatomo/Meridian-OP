@@ -201,6 +201,32 @@ export function recordClose(position_address, reason) {
  * over trailing-TP state (peak + trailing flag) from the position it replaced, so the
  * chained PnL keeps its peak instead of re-arming from zero.
  */
+/**
+ * Meridian-OP in-place (token-only) reshape: same position, so PnL is NOT chained (pnl_factor
+ * stays as it was, default 1). Only the reshape bookkeeping moves: count, time, anchor bin.
+ */
+export function recordInPlaceReshape(position_address, { activeBin, anchorTopBin = null } = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return null;
+  const prev = pos.lineage || {};
+  pos.lineage = {
+    root_position: prev.root_position ?? position_address,
+    previous_position: prev.previous_position ?? null,
+    initial_value_usd: prev.initial_value_usd ?? pos.initial_value_usd ?? null,
+    started_at: prev.started_at ?? pos.deployed_at,
+    pnl_factor: Number.isFinite(Number(prev.pnl_factor)) ? Number(prev.pnl_factor) : 1,
+    reshape_count: (prev.reshape_count ?? 0) + 1,
+    anchor_top_bin: prev.anchor_top_bin ?? anchorTopBin ?? pos.bin_range?.max ?? null,
+    last_reshape_at: new Date().toISOString(),
+    last_reshape_bin: activeBin ?? null,
+  };
+  pos.rebalance_count = pos.lineage.reshape_count;
+  pushEvent(state, { action: "reshape", position: position_address, pool_name: pos.pool_name || pos.pool, reason: `in-place token reshape #${pos.lineage.reshape_count}` });
+  save(state);
+  return pos.lineage;
+}
+
 export function setPositionLineage(position_address, lineage, carry = {}) {
   const state = load();
   const pos = state.positions[position_address];

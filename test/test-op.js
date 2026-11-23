@@ -423,5 +423,40 @@ console.log("\n[13] reshape: SOL spot below, token bid-ask above (one position)"
   check("failure after creation is flagged for cleanup", err && err.positionCreated === true);
 }
 
+console.log("\n[14] token-only in-place reshape (SOL bins untouched)");
+{
+  const { withdrawAndRedepositToken } = await import("../tools/dlmm.js");
+  const BN = (await import("bn.js")).default;
+  const { Keypair } = await import("@solana/web3.js");
+  const BIDASK = 2;
+  const run = async ({ activeAfter = 94, received = 5000, failAdd = false } = {}) => {
+    const calls = [];
+    let reads = 0;
+    const pool = {
+      removeLiquidity: async (p) => { calls.push({ op: "remove", from: p.fromBinId, to: p.toBinId, bps: p.bps.toString(), close: p.shouldClaimAndClose }); return ["txRm"]; },
+      getActiveBin: async () => ({ binId: activeAfter }),
+      addLiquidityByStrategy: async (p) => { calls.push({ op: "add", from: p.strategy.minBinId, to: p.strategy.maxBinId, x: p.totalXAmount.toString(), y: p.totalYAmount.toString(), shape: p.strategy.strategyType }); if (failAdd) throw new Error("add failed"); return "txAdd"; },
+      addLiquidityByStrategyChunkable: async () => ["txChunk"],
+    };
+    const readBalances = async () => ({ x: new BN(reads++ === 0 ? 1000 : 1000 + received), sol: new BN(0) });
+    let res, err;
+    try {
+      res = await withdrawAndRedepositToken({ pool, wallet: Keypair.generate(), positionPubKey: Keypair.generate().publicKey, xMint: "X", fromBin: 95, toBin: 100, xStrategyType: BIDASK, sendTx: async (tx) => `sig:${tx}`, readBalances, waitMs: 0 });
+    } catch (e) { err = e; }
+    return { calls, res, err };
+  };
+  let r = await run();
+  const rm = r.calls.find((c) => c.op === "remove"), add = r.calls.find((c) => c.op === "add");
+  check("withdraws ONLY the token bins above active (no claim/close)", rm.from === 95 && rm.to === 100 && rm.bps === "10000" && rm.close === false);
+  check("re-deposits exactly the token received, token-only, bid-ask, same bins", add.from === 95 && add.to === 100 && add.x === "5000" && add.y === "0" && add.shape === BIDASK);
+  check("never touches the SOL bins (no call at/below active)", r.calls.every((c) => c.from > 94));
+  r = await run({ activeAfter: 97 });
+  check("price moved up meanwhile → re-deposit starts above the new active bin", r.calls.find((c) => c.op === "add").from === 98);
+  r = await run({ failAdd: true });
+  check("re-deposit failure → flagged withdrawn with the token amount (executor sells it)", r.err?.withdrawn === true && r.err.deltaX.toString() === "5000");
+  r = await run({ received: 0 });
+  check("nothing received → error, no deposit attempted", r.err?.withdrawn === true && !r.calls.some((c) => c.op === "add"));
+}
+
 console.log(failed === 0 ? "\nALL TESTS PASSED" : `\n${failed} TEST(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

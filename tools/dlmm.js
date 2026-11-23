@@ -25,6 +25,7 @@ import {
   setPositionLineage,
   setTriggerWallets,
   setPartialTpState,
+  recordInPlaceReshape,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
@@ -2280,11 +2281,108 @@ async function closeUntrackedPosition(pool, wallet, positionPubKey) {
   log("reshape", `Half-built position ${positionPubKey.toString().slice(0, 8)} closed — funds back in wallet`);
 }
 
+/**
+ * Meridian-OP in-place, token-only reshape (reshapeMode "token_only", default).
+ * Same position: withdraw ONLY the bins above the active bin (the token side), then put that
+ * token back into the same bins [active+1 .. upper] with reshapeTokenStrategy (bid_ask).
+ * SOL bins at/below the active bin are untouched (stay spot). No new position, no swap, no
+ * lineage PnL chaining (Meteora PnL counts the withdraw + re-deposit, so it stays continuous).
+ * If the re-deposit fails the token is in the wallet: result.funds_in_wallet lets the executor
+ * sell it back to SOL (guarded); the position itself stays open and managed.
+ */
+async function reshapeTokenOnly({ position_address, tracked, reason, tokenStrategyName }) {
+  const wallet = getWallet();
+  const poolAddress = tracked.pool || await lookupPoolForPosition(position_address, wallet.publicKey.toString());
+  await getDLMM();
+  const xStrategyType = RESHAPE_STRATEGIES()[tokenStrategyName];
+  if (xStrategyType === undefined) return { success: false, error: `Invalid reshape token strategy ${tokenStrategyName}` };
+  poolCache.delete(poolAddress.toString());
+  const pool = await getPool(poolAddress);
+  const xMint = pool.lbPair.tokenXMint.toString();
+  const positionPubKey = new PublicKey(position_address);
+  const pd = (await pool.getPosition(positionPubKey))?.positionData;
+  if (!pd) return { success: false, error: "Position data unavailable" };
+  const activeBinId = (await pool.getActiveBin()).binId;
+  const fromBin = activeBinId + 1;
+  const toBin = pd.upperBinId;
+  const binsWithToken = (pd.positionBinData || []).filter((b) => b.binId >= fromBin && b.binId <= toBin && Number(b.positionXAmount || 0) > 0).length;
+  const base = { position: position_address, new_position: position_address, in_place: true, pool: poolAddress, pool_name: tracked.pool_name || null, base_mint: xMint, strategy: `token ${tokenStrategyName} (SOL untouched)`, bins_above: Math.max(0, toBin - fromBin + 1), bins_below: 0 };
+  if (fromBin > toBin || binsWithToken === 0) return { ...base, success: false, error: "No token bins above the active bin to reshape" };
+
+  if (process.env.DRY_RUN === "true") {
+    return { dry_run: true, would_reshape: { ...base, active_bin: activeBinId, from_bin: fromBin, to_bin: toBin, token_bins: binsWithToken }, message: "DRY RUN — no transaction sent" };
+  }
+  log("reshape", `Token-only reshape ${tracked.pool_name || position_address.slice(0, 8)}: bins ${fromBin}→${toBin} (${binsWithToken} with token) → ${tokenStrategyName}, SOL bins untouched — ${reason}`);
+
+  const conn = getConnection();
+  let core;
+  try {
+    core = await withdrawAndRedepositToken({ pool, wallet, positionPubKey, xMint, fromBin, toBin, xStrategyType, sendTx: (tx, signers) => sendAndConfirmTransaction(conn, tx, signers) });
+  } catch (e) {
+    _positionsCacheAt = 0;
+    if (!e.withdrawn) throw e; // nothing moved yet — a plain failure
+    const deltaX = e.deltaX ?? new BN(0);
+    log("reshape_error", `Token re-deposit failed after withdrawing bins ${fromBin}→${toBin}: ${e.message}`);
+    appendDecision({ type: "close", actor: "MANAGER", pool: poolAddress, pool_name: tracked.pool_name, position: position_address, summary: "Token-only reshape: re-deposit failed — token left in wallet", reason: `${reason}; ${e.message}`, metrics: { amount_x_raw: deltaX.toString() } });
+    return { ...base, success: false, stage: "redeposit", funds_in_wallet: !deltaX.isZero(), withdraw_txs: e.withdrawTxs, error: `Token re-deposit failed: ${e.message}` };
+  }
+  _positionsCacheAt = 0;
+  const { withdrawTxs, depositTxs, deltaX, from, liveActive } = core;
+  {
+    const lineage = recordInPlaceReshape(position_address, { activeBin: liveActive, anchorTopBin: tracked.lineage?.anchor_top_bin ?? tracked.bin_range?.max ?? pd.upperBinId });
+    appendDecision({
+      type: "reshape", actor: "MANAGER", pool: poolAddress, pool_name: tracked.pool_name, position: position_address,
+      summary: `In-place token reshape → ${tokenStrategyName}: bins ${from}→${toBin}, SOL bins untouched`,
+      reason, metrics: { active_bin: liveActive, amount_x_raw: deltaX.toString(), reshape_count: lineage?.reshape_count },
+    });
+    log("reshape", `SUCCESS — token re-deposited ${from}→${toBin} as ${tokenStrategyName} (${withdrawTxs.length + depositTxs.length} tx)`);
+    return { ...base, success: true, bin_range: { min: pd.lowerBinId, max: toBin, active: liveActive }, bins_above: toBin - from + 1, amount_sol: 0, amount_x_raw: deltaX.toString(), reshape_count: lineage?.reshape_count, txs: [...withdrawTxs, ...depositTxs] };
+  }
+}
+
+/**
+ * Core of the token-only reshape (exported for tests; deps injectable).
+ * 1) remove 100% of liquidity in [fromBin .. toBin] (token bins only, no claim/close)
+ * 2) measure the token received, 3) re-deposit it X-only over [max(fromBin, active+1) .. toBin].
+ * Errors after step 1 carry { withdrawn: true, withdrawTxs, deltaX }.
+ */
+export async function withdrawAndRedepositToken({
+  pool, wallet, positionPubKey, xMint, fromBin, toBin, xStrategyType,
+  sendTx, readBalances = readRawBalances, waitMs = 2000,
+}) {
+  const send = async (txs) => {
+    const out = [];
+    for (const tx of Array.isArray(txs) ? txs : [txs]) out.push(await sendTx(tx, [wallet]));
+    return out;
+  };
+  const before = await readBalances(wallet.publicKey, xMint);
+  const withdrawTxs = await send(await pool.removeLiquidity({ user: wallet.publicKey, position: positionPubKey, fromBinId: fromBin, toBinId: toBin, bps: new BN(10000), shouldClaimAndClose: false }));
+  let deltaX = new BN(0);
+  try {
+    if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+    const after = await readBalances(wallet.publicKey, xMint);
+    deltaX = BN.max(new BN(0), after.x.sub(before.x));
+    if (deltaX.isZero()) throw new Error("no token received from the withdrawn bins");
+    const liveActive = (await pool.getActiveBin()).binId;
+    const from = Math.max(fromBin, liveActive + 1); // price may have moved a bin meanwhile
+    if (from > toBin) throw new Error("active bin moved to the top of the range — nothing to re-deposit into");
+    const params = { positionPubKey, user: wallet.publicKey, totalXAmount: deltaX, totalYAmount: new BN(0), strategy: { minBinId: from, maxBinId: toBin, strategyType: xStrategyType }, slippage: config.standalone.enabled ? 1 : 10 };
+    const depositTxs = await send(toBin - from > 69 ? await pool.addLiquidityByStrategyChunkable(params) : await pool.addLiquidityByStrategy(params));
+    return { withdrawTxs, depositTxs, deltaX, from, liveActive };
+  } catch (e) {
+    Object.assign(e, { withdrawn: true, withdrawTxs, deltaX });
+    throw e;
+  }
+}
+
 export async function reshapePosition({ position_address, reason = "reshape", strategy = null }) {
   position_address = normalizeMint(position_address);
   const tracked = getTrackedPosition(position_address);
   if (!tracked || tracked.closed) return { success: false, error: "Position is not tracked or already closed" };
   const cfg = config.management;
+  if ((cfg.reshapeMode ?? "token_only") !== "full") {
+    return reshapeTokenOnly({ position_address, tracked, reason, tokenStrategyName: strategy || cfg.reshapeTokenStrategy || cfg.reshapeStrategy || "bid_ask" });
+  }
   // Meridian-OP: separate shapes per side. Token (X, above price) defaults to bid_ask so more is
   // sold on a bigger rebound; SOL (Y, below price) defaults to spot (even DCA). `strategy`
   // (CLI --strategy) / legacy `reshapeStrategy` only set the token side.

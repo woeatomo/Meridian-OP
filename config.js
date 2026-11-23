@@ -177,7 +177,8 @@ export const config = {
     reshapeEnabled:         u.reshapeEnabled         ?? false,
     reshapeStrategy:        u.reshapeStrategy        ?? "bid_ask", // legacy alias for reshapeTokenStrategy
     reshapeTokenStrategy:   u.reshapeTokenStrategy   ?? u.reshapeStrategy ?? "bid_ask", // token above price
-    reshapeSolStrategy:     u.reshapeSolStrategy     ?? "spot",    // SOL below price
+    reshapeSolStrategy:     u.reshapeSolStrategy     ?? "spot",    // SOL below price (reshapeMode "full" only)
+    reshapeMode:            u.reshapeMode            ?? "token_only", // "token_only": same position, only token bins re-shaped | "full": new position, re-centred
     reshapeBins:            u.reshapeBins            ?? 5,
     reshapeCooldownMinutes: u.reshapeCooldownMinutes ?? 45,
     reshapeMaxPerPosition:  u.reshapeMaxPerPosition  ?? 3,

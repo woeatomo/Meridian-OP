@@ -444,6 +444,7 @@ const toolMap = {
       reshapeStrategy: ["management", "reshapeStrategy"],
       reshapeTokenStrategy: ["management", "reshapeTokenStrategy"],
       reshapeSolStrategy: ["management", "reshapeSolStrategy"],
+      reshapeMode: ["management", "reshapeMode"],
       reshapeBins: ["management", "reshapeBins"],
       reshapeCooldownMinutes: ["management", "reshapeCooldownMinutes"],
       reshapeMaxPerPosition: ["management", "reshapeMaxPerPosition"],

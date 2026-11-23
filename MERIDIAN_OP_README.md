@@ -34,7 +34,14 @@ Syarat RESHAPE (semua harus terpenuhi):
 - fee posisi ≥ `reshapeFeeCostMultiple` × `reshapeCostUsd`;
 - kondisi di atas bertahan `reshapeConfirmMinutes` (2) berturut-turut (hysteresis).
 
-Eksekusi (`reshape_position`, lewat wallet lock + safety check ulang):
+**Mode default `reshapeMode: "token_only"`** (in-place, satu sisi): di posisi yang SAMA, hanya bin di
+atas harga (yang sudah jadi token) ditarik lalu dipasang ulang sebagai `reshapeTokenStrategy`
+(bid_ask) di bin yang sama. Bin SOL di bawah harga tidak disentuh (tetap spot). Tanpa posisi baru,
+tanpa swap, PnL tetap kontinu. Gagal pasang ulang → token dijual ke SOL lewat swap guard, posisi
+tetap jalan. Konsekuensi: range SOL tidak ikut turun — kalau harga keluar dari bawah range, exit OOR
+kiri yang memutuskan.
+
+Mode `reshapeMode: "full"` (cara lama, posisi baru + re-centre ke bawah), eksekusinya:
 1. Rencanakan range baru dan pastikan bin array sudah ada **sebelum** menyentuh dana.
 2. Tarik semua likuiditas + klaim fee + tutup posisi, **tanpa swap**; ukur selisih saldo token & SOL.
 3. Buka posisi baru dengan bentuk terpisah per sisi: **token di atas harga** `reshapeTokenStrategy` (default bid_ask) sampai bin atas awal

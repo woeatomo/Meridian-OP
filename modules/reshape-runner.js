@@ -40,7 +40,7 @@ export async function maybeReshape(p, { hasExitSignal = false, executeTool, now 
       .catch((e) => ({ success: false, error: e.message }));
     const ok = res?.success === true || res?.dry_run === true;
     if (res?.dry_run || !ok) dryRunAt.set(p.position, now);
-    log(ok ? "reshape" : "reshape_error", `${p.pair ?? p.position.slice(0, 8)}: ${ok ? (res.dry_run ? "DRY RUN reshape planned" : `reshaped → ${res.new_position}`) : `reshape FAILED — ${res?.error || res?.reason || "unknown"}`}`);
+    log(ok ? "reshape" : "reshape_error", `${p.pair ?? p.position.slice(0, 8)}: ${ok ? (res.dry_run ? "DRY RUN reshape planned" : res.in_place ? "token re-shaped in place" : `reshaped → ${res.new_position}`) : `reshape FAILED — ${res?.error || res?.reason || "unknown"}`}`);
     return res;
   } finally {
     clearReshapePending(p.position);
