@@ -2220,18 +2220,85 @@ const RESHAPE_STRATEGIES = () => ({ spot: _StrategyType?.Spot, curve: _StrategyT
  * PnL lineage: the new position stores pnl_factor = 1 + (chained PnL at reshape) so the
  * stop loss / trailing keep measuring from the original capital.
  */
+/**
+ * Meridian-OP: open ONE position over [minBinId, maxBinId] and fund each side with its own shape:
+ *   - SOL (Y) over [minBinId .. activeBinId]   with yStrategyType (default spot)
+ *   - token (X) over [activeBinId+1 .. maxBinId] with xStrategyType (default bid_ask)
+ * The SOL leg is the same single-sided-Y-ending-at-active pattern deployPosition uses.
+ * Errors thrown after the position account exists carry `positionCreated = true`.
+ */
+export async function submitSplitShapePositionTxs({
+  pool, wallet, positionKeypair, minBinId, activeBinId, maxBinId,
+  totalXLamports, totalYLamports, xStrategyType, yStrategyType, label = "reshape",
+  sendTx = (tx, signers) => sendAndConfirmTransaction(getConnection(), tx, signers), // injectable for tests
+}) {
+  const txHashes = [];
+  const slippage = config.standalone.enabled ? 1 : 10; // SDK expects percent
+  const send = async (txs, signers) => {
+    for (const tx of Array.isArray(txs) ? txs : [txs]) {
+      const hash = await sendTx(tx, signers);
+      txHashes.push(hash);
+    }
+  };
+
+  // 1. Empty position spanning the whole range.
+  if (maxBinId - minBinId > 69) {
+    const createTxs = await pool.createExtendedEmptyPosition(minBinId, maxBinId, positionKeypair.publicKey, wallet.publicKey);
+    const arr = Array.isArray(createTxs) ? createTxs : [createTxs];
+    for (let i = 0; i < arr.length; i++) await send(arr[i], i === 0 ? [wallet, positionKeypair] : [wallet]);
+  } else {
+    await send(await pool.createEmptyPosition({ positionPubKey: positionKeypair.publicKey, minBinId, maxBinId, user: wallet.publicKey }), [wallet, positionKeypair]);
+  }
+  log(label, `Empty position created ${minBinId}→${maxBinId}`);
+
+  const addLeg = async (from, to, x, y, strategyType, what) => {
+    if (to < from) return;
+    const params = { positionPubKey: positionKeypair.publicKey, user: wallet.publicKey, totalXAmount: x, totalYAmount: y, strategy: { minBinId: from, maxBinId: to, strategyType }, slippage };
+    const txs = to - from > 69 ? await pool.addLiquidityByStrategyChunkable(params) : await pool.addLiquidityByStrategy(params);
+    await send(txs, [wallet]);
+    log(label, `${what} added ${from}→${to}`);
+  };
+  try {
+    if (totalYLamports.gt(new BN(0))) await addLeg(minBinId, activeBinId, new BN(0), totalYLamports, yStrategyType, "SOL leg");
+    if (totalXLamports.gt(new BN(0))) await addLeg(activeBinId + 1, maxBinId, totalXLamports, new BN(0), xStrategyType, "Token leg");
+  } catch (e) {
+    e.positionCreated = true;
+    throw e;
+  }
+  return txHashes;
+}
+
+/** Withdraw everything from (or just close) a position the bot doesn't track. Best effort. */
+async function closeUntrackedPosition(pool, wallet, positionPubKey) {
+  const conn = getConnection();
+  const pd = (await pool.getPosition(positionPubKey).catch(() => null))?.positionData;
+  const hasLiquidity = Array.isArray(pd?.positionBinData) && pd.positionBinData.some((b) => new BN(b.positionLiquidity || "0").gt(new BN(0)));
+  const txs = hasLiquidity
+    ? await pool.removeLiquidity({ user: wallet.publicKey, position: positionPubKey, fromBinId: pd.lowerBinId, toBinId: pd.upperBinId, bps: new BN(10000), shouldClaimAndClose: true })
+    : await pool.closePosition({ owner: wallet.publicKey, position: { publicKey: positionPubKey } });
+  for (const tx of Array.isArray(txs) ? txs : [txs]) await sendAndConfirmTransaction(conn, tx, [wallet]);
+  log("reshape", `Half-built position ${positionPubKey.toString().slice(0, 8)} closed — funds back in wallet`);
+}
+
 export async function reshapePosition({ position_address, reason = "reshape", strategy = null }) {
   position_address = normalizeMint(position_address);
   const tracked = getTrackedPosition(position_address);
   if (!tracked || tracked.closed) return { success: false, error: "Position is not tracked or already closed" };
   const cfg = config.management;
-  const strategyName = strategy || cfg.reshapeStrategy || "bid_ask";
+  // Meridian-OP: separate shapes per side. Token (X, above price) defaults to bid_ask so more is
+  // sold on a bigger rebound; SOL (Y, below price) defaults to spot (even DCA). `strategy`
+  // (CLI --strategy) / legacy `reshapeStrategy` only set the token side.
+  const tokenStrategyName = strategy || cfg.reshapeTokenStrategy || cfg.reshapeStrategy || "bid_ask";
+  const solStrategyName = cfg.reshapeSolStrategy || "spot";
+  const strategyName = `token ${tokenStrategyName} + SOL ${solStrategyName}`;
 
   const wallet = getWallet();
   const poolAddress = tracked.pool || await lookupPoolForPosition(position_address, wallet.publicKey.toString());
   await getDLMM();
-  const strategyType = RESHAPE_STRATEGIES()[strategyName];
-  if (strategyType === undefined) return { success: false, error: `Invalid reshape strategy ${strategyName}` };
+  const xStrategyType = RESHAPE_STRATEGIES()[tokenStrategyName];
+  const yStrategyType = RESHAPE_STRATEGIES()[solStrategyName];
+  if (xStrategyType === undefined) return { success: false, error: `Invalid reshape token strategy ${tokenStrategyName}` };
+  if (yStrategyType === undefined) return { success: false, error: `Invalid reshape SOL strategy ${solStrategyName}` };
 
   poolCache.delete(poolAddress.toString());
   const pool = await getPool(poolAddress);
@@ -2310,19 +2377,27 @@ export async function reshapePosition({ position_address, reason = "reshape", st
     if (!hasX && !hasY) throw new Error("nothing to redeploy after withdrawal");
     plan = planReshapeRange({ activeBin: activeBinId, anchorTop, binsBelow, hasX, hasY, cfg });
     await assertRangeDoesNotRequireBinArrayInitialization(pool, plan.minBinId, plan.maxBinId);
-    deployTxs = await submitNewPositionTxs({
+    deployTxs = await submitSplitShapePositionTxs({
       pool,
       wallet,
       positionKeypair: newPosition,
       minBinId: plan.minBinId,
+      activeBinId,
       maxBinId: plan.maxBinId,
       totalXLamports: deltaX,
       totalYLamports: new BN(String(Math.floor(yLamports))),
-      strategyType,
+      xStrategyType,
+      yStrategyType,
       label: "reshape",
     });
   } catch (e) {
     log("reshape_error", `Redeploy failed after withdrawal: ${e.message}`);
+    if (e.positionCreated) {
+      // The new position exists (maybe partly funded) but won't be tracked: close it so its
+      // funds return to the wallet, where the funds_in_wallet path sells the token back.
+      await closeUntrackedPosition(pool, wallet, newPosition.publicKey)
+        .catch((err) => log("reshape_error", `Cleanup of half-built position ${newPosition.publicKey.toString().slice(0, 8)} failed: ${err.message} — close it manually`));
+    }
     appendDecision({
       type: "close",
       actor: "MANAGER",

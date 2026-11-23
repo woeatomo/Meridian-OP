@@ -442,6 +442,8 @@ const toolMap = {
       emergencySlCooldownHours: ["management", "emergencySlCooldownHours"],
       reshapeEnabled: ["management", "reshapeEnabled"],
       reshapeStrategy: ["management", "reshapeStrategy"],
+      reshapeTokenStrategy: ["management", "reshapeTokenStrategy"],
+      reshapeSolStrategy: ["management", "reshapeSolStrategy"],
       reshapeBins: ["management", "reshapeBins"],
       reshapeCooldownMinutes: ["management", "reshapeCooldownMinutes"],
       reshapeMaxPerPosition: ["management", "reshapeMaxPerPosition"],

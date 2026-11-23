@@ -387,5 +387,41 @@ console.log("\n[12] walletAddress vs WALLET_PRIVATE_KEY");
   check("LIVE without key → refuse", !checkWalletConsistency({ walletAddress: me, privateKey: "", dryRun: false }).ok);
 }
 
+console.log("\n[13] reshape: SOL spot below, token bid-ask above (one position)");
+{
+  const { submitSplitShapePositionTxs } = await import("../tools/dlmm.js");
+  const BN = (await import("bn.js")).default;
+  const { Keypair } = await import("@solana/web3.js");
+  const SPOT = 0, BIDASK = 2;
+  const mkPool = (calls, failOn = null) => ({
+    createEmptyPosition: async (p) => { calls.push({ op: "createEmpty", min: p.minBinId, max: p.maxBinId }); return "txCreate"; },
+    createExtendedEmptyPosition: async (min, max) => { calls.push({ op: "createExtended", min, max }); return ["txCreateExt"]; },
+    addLiquidityByStrategy: async (p) => {
+      calls.push({ op: "add", from: p.strategy.minBinId, to: p.strategy.maxBinId, x: p.totalXAmount.toString(), y: p.totalYAmount.toString(), shape: p.strategy.strategyType });
+      if (failOn === "token" && p.totalXAmount.gtn(0)) throw new Error("boom");
+      return "txAdd";
+    },
+    addLiquidityByStrategyChunkable: async (p) => { calls.push({ op: "addChunk", from: p.strategy.minBinId, to: p.strategy.maxBinId, shape: p.strategy.strategyType }); return ["txAddChunk"]; },
+  });
+  const base = { wallet: Keypair.generate(), positionKeypair: Keypair.generate(), xStrategyType: BIDASK, yStrategyType: SPOT, sendTx: async (tx) => `sig:${tx}` };
+  let calls = [];
+  const sigs = await submitSplitShapePositionTxs({ ...base, pool: mkPool(calls), minBinId: 44, activeBinId: 94, maxBinId: 100, totalXLamports: new BN(5000), totalYLamports: new BN(7000) });
+  const sol = calls.find((c) => c.op === "add" && c.y !== "0");
+  const tok = calls.find((c) => c.op === "add" && c.x !== "0");
+  check("one empty position over the whole range", calls[0].op === "createEmpty" && calls[0].min === 44 && calls[0].max === 100);
+  check("SOL leg: spot, [min .. active], SOL only", sol && sol.shape === SPOT && sol.from === 44 && sol.to === 94 && sol.x === "0" && sol.y === "7000", JSON.stringify(sol));
+  check("token leg: bid-ask, [active+1 .. max], token only", tok && tok.shape === BIDASK && tok.from === 95 && tok.to === 100 && tok.y === "0" && tok.x === "5000", JSON.stringify(tok));
+  check("3 transactions sent", sigs.length === 3);
+  calls = [];
+  await submitSplitShapePositionTxs({ ...base, pool: mkPool(calls), minBinId: 0, activeBinId: 80, maxBinId: 100, totalXLamports: new BN(1), totalYLamports: new BN(1) });
+  check("wide range → extended position + chunked SOL leg", calls[0].op === "createExtended" && calls.some((c) => c.op === "addChunk" && c.from === 0 && c.to === 80));
+  calls = [];
+  await submitSplitShapePositionTxs({ ...base, pool: mkPool(calls), minBinId: 44, activeBinId: 94, maxBinId: 94, totalXLamports: new BN(0), totalYLamports: new BN(9) });
+  check("no token → SOL leg only", calls.filter((c) => c.op === "add").length === 1);
+  let err = null;
+  try { await submitSplitShapePositionTxs({ ...base, pool: mkPool([], "token"), minBinId: 44, activeBinId: 94, maxBinId: 100, totalXLamports: new BN(5), totalYLamports: new BN(5) }); } catch (e) { err = e; }
+  check("failure after creation is flagged for cleanup", err && err.positionCreated === true);
+}
+
 console.log(failed === 0 ? "\nALL TESTS PASSED" : `\n${failed} TEST(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

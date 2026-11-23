@@ -175,7 +175,9 @@ export const config = {
     emergencySlCooldownHours:     u.emergencySlCooldownHours     ?? 24,
     // Meridian-OP: Reshape (modules/reshape-manager.js) — satu arah ke bawah, Spot -> Bid-Ask.
     reshapeEnabled:         u.reshapeEnabled         ?? false,
-    reshapeStrategy:        u.reshapeStrategy        ?? "bid_ask",
+    reshapeStrategy:        u.reshapeStrategy        ?? "bid_ask", // legacy alias for reshapeTokenStrategy
+    reshapeTokenStrategy:   u.reshapeTokenStrategy   ?? u.reshapeStrategy ?? "bid_ask", // token above price
+    reshapeSolStrategy:     u.reshapeSolStrategy     ?? "spot",    // SOL below price
     reshapeBins:            u.reshapeBins            ?? 5,
     reshapeCooldownMinutes: u.reshapeCooldownMinutes ?? 45,
     reshapeMaxPerPosition:  u.reshapeMaxPerPosition  ?? 3,

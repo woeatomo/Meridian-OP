@@ -37,8 +37,8 @@ Syarat RESHAPE (semua harus terpenuhi):
 Eksekusi (`reshape_position`, lewat wallet lock + safety check ulang):
 1. Rencanakan range baru dan pastikan bin array sudah ada **sebelum** menyentuh dana.
 2. Tarik semua likuiditas + klaim fee + tutup posisi, **tanpa swap**; ukur selisih saldo token & SOL.
-3. Buka posisi baru (`reshapeStrategy`, default bid_ask): **token di atas harga** sampai bin atas awal
-   (dijual lebih banyak saat rebound ke harga lebih tinggi), **SOL di bawah harga** (DCA ke bawah).
+3. Buka posisi baru dengan bentuk terpisah per sisi: **token di atas harga** `reshapeTokenStrategy` (default bid_ask) sampai bin atas awal
+   (dijual lebih banyak saat rebound ke harga lebih tinggi), **SOL di bawah harga** `reshapeSolStrategy` (default spot — DCA merata ke bawah). Satu posisi: dibuat kosong, lalu diisi 2 kali (SOL spot, token bid-ask).
 4. PnL posisi baru dirantai: `pnl_pct = faktor_lineage × (1 + pnl_baru) − 1`, sehingga SL −15% /
    Emergency SL / trailing tetap dihitung dari modal awal. Peak trailing ikut terbawa.
 5. Bila buka posisi baru gagal setelah penarikan: posisi lama dicatat closed, token dijual ke SOL
