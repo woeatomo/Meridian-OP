@@ -471,6 +471,7 @@ const toolMap = {
       killSwitchConfirmChecks: ["management", "killSwitchConfirmChecks"],
       killSwitchConfirmMinutes: ["management", "killSwitchConfirmMinutes"],
       dailyLossConfirmChecks: ["management", "dailyLossConfirmChecks"],
+      dailyLossBasis: ["management", "dailyLossBasis"],
       portfolioSettleSec: ["management", "portfolioSettleSec"],
       portfolioIndexGraceMin: ["management", "portfolioIndexGraceMin"],
       portfolioPositionRentSol: ["management", "portfolioPositionRentSol"],

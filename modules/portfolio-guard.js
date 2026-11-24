@@ -15,7 +15,9 @@ export function portfolioGuard(g, cfg = {}) {
   if (!g || !(g.dayStartEquity > 0) || !(g.equity > 0)) {
     return { allowDeploy: false, killSwitch: false, tripped: null, reason: "equity data incomplete — no new deploys this tick" };
   }
-  const dayPnlPct = ((g.equity - g.dayStartEquity) / g.dayStartEquity) * 100;
+  // Daily loss can use a different basis (e.g. realized-only) than the drawdown / kill switch.
+  const dayEquity = Number.isFinite(Number(g.dailyEquity)) ? Number(g.dailyEquity) : g.equity;
+  const dayPnlPct = ((dayEquity - g.dayStartEquity) / g.dayStartEquity) * 100;
   const drawdownPct = g.peakEquity > 0 ? ((g.equity - g.peakEquity) / g.peakEquity) * 100 : 0;
   const metrics = { dayPnlPct: Math.round(dayPnlPct * 100) / 100, drawdownPct: Math.round(drawdownPct * 100) / 100 };
   if (drawdownPct <= killPct) {

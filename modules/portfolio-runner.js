@@ -111,6 +111,22 @@ export function computeEquity(balances, positions, unit = "sol", { rentSol = 0 }
   };
 }
 
+/** "realized" (default) | "equity". */
+export function dailyLossBasis() {
+  const b = String(config.management.dailyLossBasis ?? "realized").toLowerCase();
+  return b === "equity" ? "equity" : "realized";
+}
+
+/**
+ * Pure. Mark-to-market equity minus the unrealized PnL of open positions (Meteora's per-position
+ * pnl_true_usd = value + withdrawals + fees − deposits), i.e. open positions counted at what went
+ * in. Moves only when positions close (or on gas / swap costs). Missing pnl counts as 0.
+ */
+export function realizedEquity(eq, positions) {
+  const unrealUsd = (positions || []).reduce((s, p) => s + (Number.isFinite(Number(p.pnl_true_usd)) ? Number(p.pnl_true_usd) : 0), 0);
+  return eq.unit === "usd" ? eq.equity - unrealUsd : eq.equity - unrealUsd / eq.sol_price;
+}
+
 /**
  * Rent locked in the given position accounts, in SOL. One getMultipleAccountsInfo call
  * (≤100 accounts). Falls back to `portfolioPositionRentSol` per position if the read fails.
@@ -153,11 +169,13 @@ export function isPortfolioStateStale(now = Date.now()) {
 }
 
 /** Reset baseline (setelah deposit / withdraw manual). Tidak mengubah kill switch aktif kecuali `clearKill`. */
-export function resetPortfolioBaseline({ equity, unit = "sol", clearKill = false, now = Date.now() } = {}) {
+export function resetPortfolioBaseline({ equity, dayStartEquity = equity, basis = dailyLossBasis(), unit = "sol", clearKill = false, now = Date.now() } = {}) {
   const cfg = config.management;
   const patch = {
     day: tradingDay(now, cfg.portfolioDayUtcOffsetHours ?? 7),
-    day_start_equity: equity ?? null,
+    day_start_equity: dayStartEquity ?? null,
+    day_start_basis: basis,
+    last_daily_equity: dayStartEquity ?? null,
     peak_equity: equity ?? null,
     last_equity: equity ?? null,
     unit,
@@ -213,14 +231,22 @@ export async function evaluatePortfolio({ positions, getWalletBalances, getPosit
       return { allowDeploy: false, killSwitch: false, reason: `equity unavailable: ${eq.error}` };
     }
 
-    // Unit changed (config edit) -> old numbers are meaningless: re-baseline.
-    if (st.unit && st.unit !== eq.unit) st = resetPortfolioBaseline({ equity: eq.equity, unit: eq.unit, now });
+    // Daily-loss basis: "realized" (default) ignores open positions' unrealized PnL — their
+    // current value is replaced by what went into them, so only closed positions (plus gas /
+    // swap costs) move the daily number. "equity" = mark-to-market (open losses count too).
+    const basis = dailyLossBasis();
+    const dailyEquity = basis === "realized" ? realizedEquity(eq, rec.positions) : eq.equity;
 
-    const patch = { last_equity: eq.equity, last_at: new Date(now).toISOString(), unit: eq.unit, sol_price: eq.sol_price, last_rent_sol: eq.rent_sol };
-    // New trading day: new day-start baseline, clear the daily block.
-    if (st.day !== day || !(st.day_start_equity > 0)) {
-      Object.assign(patch, { day, day_start_equity: eq.equity, day_blocked: false, day_blocked_reason: null });
-      if (st.day && st.day !== day) log("portfolio", `New trading day ${day}: start equity ${eq.equity.toFixed(4)} ${eq.unit.toUpperCase()}`);
+    // Unit changed (config edit) -> old numbers are meaningless: re-baseline.
+    if (st.unit && st.unit !== eq.unit) st = resetPortfolioBaseline({ equity: eq.equity, dayStartEquity: dailyEquity, basis, unit: eq.unit, now });
+
+    const patch = { last_equity: eq.equity, last_daily_equity: dailyEquity, last_at: new Date(now).toISOString(), unit: eq.unit, sol_price: eq.sol_price, last_rent_sol: eq.rent_sol };
+    // New trading day (or the daily basis changed): new day-start baseline, clear the daily block.
+    const basisChanged = (st.day_start_basis ?? "equity") !== basis;
+    if (st.day !== day || !(st.day_start_equity > 0) || basisChanged) {
+      Object.assign(patch, { day, day_start_equity: dailyEquity, day_start_basis: basis, day_blocked: false, day_blocked_reason: null });
+      if (st.day && st.day !== day) log("portfolio", `New trading day ${day}: start ${basis} equity ${dailyEquity.toFixed(4)} ${eq.unit.toUpperCase()}`);
+      else if (basisChanged && st.day) log("portfolio", `Daily loss basis → ${basis}: day start re-baselined to ${dailyEquity.toFixed(4)} ${eq.unit.toUpperCase()}`);
     }
     // Kill switch expired: resume with a fresh peak (the drawdown already happened).
     const killUntil = st.kill_switch_until ? new Date(st.kill_switch_until).getTime() : 0;
@@ -235,6 +261,7 @@ export async function evaluatePortfolio({ positions, getWalletBalances, getPosit
 
     const guardInput = {
       dayStartEquity: st.day_start_equity,
+      dailyEquity,
       equity: eq.equity,
       peakEquity: st.peak_equity,
       killSwitchUntil: killMode === "enforce" && st.kill_switch_until ? new Date(st.kill_switch_until).getTime() : null,
@@ -273,7 +300,7 @@ export async function evaluatePortfolio({ positions, getWalletBalances, getPosit
     if (decision.tripped === "daily_loss" && !st.day_blocked && streaks.daily.count >= (cfg.dailyLossConfirmChecks ?? 2)) {
       savePortfolioState({ day_blocked: true, day_blocked_reason: decision.reason });
       log("portfolio_warn", `DAILY LOSS LIMIT: ${decision.reason}`);
-      notify?.("DAILY_LOSS_LIMIT", `${decision.reason}\nEquity ${eq.equity.toFixed(4)} ${eq.unit.toUpperCase()} (start ${st.day_start_equity.toFixed(4)}). Existing positions keep being managed.`);
+      notify?.("DAILY_LOSS_LIMIT", `${decision.reason}\n${basis === "realized" ? "Realized equity" : "Equity"} ${dailyEquity.toFixed(4)} ${eq.unit.toUpperCase()} (day start ${st.day_start_equity.toFixed(4)}). Existing positions keep being managed.`);
     }
 
     if (decision.killSwitch) {
@@ -313,13 +340,14 @@ export function formatGuardStatus(now = Date.now()) {
   const st = getPortfolioState();
   const u = (st.unit || cfg.portfolioGuardUnit || "sol").toUpperCase();
   const f = (v) => (Number.isFinite(Number(v)) ? Number(v).toFixed(4) : "?");
-  const dayPnl = st.day_start_equity > 0 && st.last_equity > 0 ? ((st.last_equity - st.day_start_equity) / st.day_start_equity) * 100 : null;
+  const dayNow = st.last_daily_equity ?? st.last_equity;
+  const dayPnl = st.day_start_equity > 0 && dayNow > 0 ? ((dayNow - st.day_start_equity) / st.day_start_equity) * 100 : null;
   const dd = st.peak_equity > 0 && st.last_equity > 0 ? ((st.last_equity - st.peak_equity) / st.peak_equity) * 100 : null;
   const block = getDeployBlock(now);
   return [
     `Portfolio guard: ${cfg.portfolioGuardEnabled === false ? "DISABLED" : "on"} (${u}) | kill switch: ${killSwitchMode()}`,
     `Equity: ${f(st.last_equity)} ${u} (incl. ${f(st.last_rent_sol ?? 0)} SOL refundable position rent) | day start ${f(st.day_start_equity)} (${st.day || "?"}) | peak ${f(st.peak_equity)}`,
-    `Day PnL: ${dayPnl == null ? "?" : dayPnl.toFixed(2)}% (limit ${cfg.dailyLossLimitPct}%) | Drawdown: ${dd == null ? "?" : dd.toFixed(2)}% (kill ${cfg.portfolioKillSwitchPct}%)`,
+    `Day PnL (${st.day_start_basis ?? dailyLossBasis()}): ${dayPnl == null ? "?" : dayPnl.toFixed(2)}% (limit ${cfg.dailyLossLimitPct}%) | Drawdown: ${dd == null ? "?" : dd.toFixed(2)}% (kill ${cfg.portfolioKillSwitchPct}%)`,
     `Deploys: ${block ? `BLOCKED — ${block}` : "allowed"}`,
     `Last check: ${st.last_at || "never"}`,
   ].join("\n");
@@ -334,7 +362,7 @@ export async function resetGuardNow({ getMyPositions, getWalletBalances, clearKi
   const rentSol = await positionsRentSol(rec.positions.map((p) => p.position), { fallbackPerPosition: Number(config.management.portfolioPositionRentSol ?? 0.0575) });
   const eq = computeEquity(balances, rec.positions, config.management.portfolioGuardUnit === "usd" ? "usd" : "sol", { rentSol });
   if (eq.error) throw new Error(eq.error);
-  resetPortfolioBaseline({ equity: eq.equity, unit: eq.unit, clearKill });
+  resetPortfolioBaseline({ equity: eq.equity, dayStartEquity: dailyLossBasis() === "realized" ? realizedEquity(eq, rec.positions) : eq.equity, unit: eq.unit, clearKill });
   log("portfolio", `Baseline reset to ${eq.equity.toFixed(4)} ${eq.unit.toUpperCase()}${clearKill ? " (kill switch cleared)" : ""}`);
   return formatGuardStatus();
 }

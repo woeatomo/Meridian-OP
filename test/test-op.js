@@ -191,6 +191,18 @@ console.log("\n[6] portfolio guard (daily loss + kill switch)");
   check("rent read on-chain from position accounts", Math.abs(await positionsRentSol([pk1, pk2], { connection: fakeConn }) - 0.115) < 1e-9);
   check("RPC failure → per-position fallback estimate", (await positionsRentSol([pk1, pk2], { connection: { getMultipleAccountsInfo: async () => { throw new Error("rpc"); } }, fallbackPerPosition: 0.06 })) === 0.12);
   check("no positions → no rent", (await positionsRentSol([])) === 0);
+
+  // Daily loss basis: realized ignores open positions' unrealized PnL.
+  const { realizedEquity, dailyLossBasis } = await import("../modules/portfolio-runner.js");
+  check("daily loss basis defaults to realized", dailyLossBasis() === "realized");
+  const eqOpen = { equity: 1.0, unit: "sol", sol_price: 100 };
+  check("realized equity removes open unrealized PnL (−$20 open → +0.2 SOL back)", Math.abs(realizedEquity(eqOpen, [{ pnl_true_usd: -20 }]) - 1.2) < 1e-9);
+  check("realized equity removes unrealized gains too", Math.abs(realizedEquity(eqOpen, [{ pnl_true_usd: 10 }]) - 0.9) < 1e-9);
+  check("missing pnl counts as 0", realizedEquity(eqOpen, [{}]) === 1.0);
+  check("USD unit", realizedEquity({ equity: 100, unit: "usd", sol_price: 100 }, [{ pnl_true_usd: -5 }]) === 105);
+  check("guard uses dailyEquity for the daily rule, equity for drawdown",
+    pg({ dayStartEquity: 1.2, dailyEquity: 1.2, equity: 1.0, peakEquity: 1.2 }, { ...cfg, portfolioKillSwitchPct: -50 }).tripped === null
+    && pg({ dayStartEquity: 1.2, equity: 1.0, peakEquity: 1.2 }, { ...cfg, portfolioKillSwitchPct: -50 }).tripped === "daily_loss");
 }
 
 console.log("\n[7] regime gate (acute rules, fail-open)");

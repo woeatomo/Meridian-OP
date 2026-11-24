@@ -207,6 +207,7 @@ export const config = {
     killSwitchConfirmChecks: u.killSwitchConfirmChecks ?? 3,  // drawdown must hold N consecutive checks ...
     killSwitchConfirmMinutes: u.killSwitchConfirmMinutes ?? 3, // ... spanning at least M minutes
     dailyLossConfirmChecks: u.dailyLossConfirmChecks ?? 2,
+    dailyLossBasis:         u.dailyLossBasis         ?? "realized", // "realized": only closed positions count | "equity": open positions marked to market
     portfolioSettleSec:     u.portfolioSettleSec     ?? 120,   // skip equity checks right after a transaction
     portfolioIndexGraceMin: u.portfolioIndexGraceMin ?? 10,    // new position not yet listed by Meteora -> skip, not a loss
     portfolioPositionRentSol: u.portfolioPositionRentSol ?? 0.0575, // fallback rent per position if the on-chain read fails
