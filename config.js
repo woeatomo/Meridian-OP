@@ -209,6 +209,7 @@ export const config = {
     dailyLossConfirmChecks: u.dailyLossConfirmChecks ?? 2,
     portfolioSettleSec:     u.portfolioSettleSec     ?? 120,   // skip equity checks right after a transaction
     portfolioIndexGraceMin: u.portfolioIndexGraceMin ?? 10,    // new position not yet listed by Meteora -> skip, not a loss
+    portfolioPositionRentSol: u.portfolioPositionRentSol ?? 0.0575, // fallback rent per position if the on-chain read fails
     // Meridian-OP: Partial TP (modules/partial-tp.js). Saat aktif, TP penuh pindah ke partialTpFinalPct.
     partialTpEnabled:       u.partialTpEnabled       ?? false,
     partialTp1Pct:          u.partialTp1Pct          ?? 5,

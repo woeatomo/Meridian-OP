@@ -473,6 +473,7 @@ const toolMap = {
       dailyLossConfirmChecks: ["management", "dailyLossConfirmChecks"],
       portfolioSettleSec: ["management", "portfolioSettleSec"],
       portfolioIndexGraceMin: ["management", "portfolioIndexGraceMin"],
+      portfolioPositionRentSol: ["management", "portfolioPositionRentSol"],
       partialTpEnabled: ["management", "partialTpEnabled"],
       partialTp1Pct: ["management", "partialTp1Pct"],
       partialTp1Fraction: ["management", "partialTp1Fraction"],

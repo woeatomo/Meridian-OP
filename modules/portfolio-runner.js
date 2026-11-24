@@ -18,7 +18,8 @@ import { config } from "../config.js";
 import { log } from "../logger.js";
 import { getPortfolioState, savePortfolioState, getTrackedPositions } from "../state.js";
 import { portfolioGuard } from "./portfolio-guard.js";
-import { isRpcSafeMode } from "./rpc-health.js";
+import { isRpcSafeMode, rpcConnection } from "./rpc-health.js";
+import { PublicKey } from "@solana/web3.js";
 
 const STALE_MS = 15 * 60_000;
 let lastEvalAt = 0;
@@ -83,7 +84,7 @@ export function tradingDay(now = Date.now(), offsetHours = 7) {
  * Token tanpa harga diabaikan (dust / rug), tetapi harga SOL dan nilai posisi wajib ada.
  * Return { equity, unit, wallet_usd, positions_usd, sol_price } atau { error }.
  */
-export function computeEquity(balances, positions, unit = "sol") {
+export function computeEquity(balances, positions, unit = "sol", { rentSol = 0 } = {}) {
   if (!balances || balances.error) return { error: "balance read unavailable" };
   const solPrice = Number(balances.sol_price);
   if (!(solPrice > 0) || !Number.isFinite(Number(balances.sol))) return { error: "SOL price unavailable" };
@@ -96,14 +97,38 @@ export function computeEquity(balances, positions, unit = "sol") {
     // Unclaimed fees belong to the position's value too.
     positionsUsd += v + (Number(p.unclaimed_fees_true_usd) || 0);
   }
-  const totalUsd = walletUsd + positionsUsd;
+  // Position account rent (~0.057 SOL each) left the wallet at deploy and comes back in full at
+  // close — it's a deposit, not a loss. Meteora's position value excludes it, so add it back.
+  const rentUsd = Math.max(0, Number(rentSol) || 0) * solPrice;
+  const totalUsd = walletUsd + positionsUsd + rentUsd;
   return {
     equity: unit === "usd" ? totalUsd : totalUsd / solPrice,
     unit: unit === "usd" ? "usd" : "sol",
     wallet_usd: walletUsd,
     positions_usd: positionsUsd,
+    rent_sol: Math.max(0, Number(rentSol) || 0),
     sol_price: solPrice,
   };
+}
+
+/**
+ * Rent locked in the given position accounts, in SOL. One getMultipleAccountsInfo call
+ * (≤100 accounts). Falls back to `portfolioPositionRentSol` per position if the read fails.
+ */
+export async function positionsRentSol(addresses, { connection = null, fallbackPerPosition = 0.0575 } = {}) {
+  const list = (addresses || []).filter(Boolean);
+  if (!list.length) return 0;
+  try {
+    const conn = connection || rpcConnection("confirmed");
+    let lamports = 0;
+    for (let i = 0; i < list.length; i += 100) {
+      const infos = await conn.getMultipleAccountsInfo(list.slice(i, i + 100).map((a) => new PublicKey(a)), "confirmed");
+      for (const info of infos) lamports += Number(info?.lamports || 0);
+    }
+    return lamports / 1e9;
+  } catch {
+    return list.length * fallbackPerPosition;
+  }
 }
 
 /** Status blokir deploy dari state terakhir (tanpa I/O jaringan). */
@@ -151,7 +176,7 @@ export function resetPortfolioBaseline({ equity, unit = "sol", clearKill = false
  * - executeTool: dipakai untuk menutup semua posisi saat kill switch. Tanpa executeTool
  *   (mis. dari safety check deploy) kill switch dicatat dan eksekusinya di siklus berikutnya.
  */
-export async function evaluatePortfolio({ positions, getWalletBalances, executeTool = null, notify = null, now = Date.now(), minIntervalMs = 0 } = {}) {
+export async function evaluatePortfolio({ positions, getWalletBalances, getPositionRentSol = null, executeTool = null, notify = null, now = Date.now(), minIntervalMs = 0 } = {}) {
   const cfg = config.management;
   if (cfg.portfolioGuardEnabled === false) return { allowDeploy: true, reason: "portfolio guard disabled" };
   if (minIntervalMs > 0 && now - lastEvalAt < minIntervalMs) return null;
@@ -174,7 +199,8 @@ export async function evaluatePortfolio({ positions, getWalletBalances, executeT
     }
     if (rec.stale.length) log("portfolio", `Ignoring ${rec.stale.length} already-closed position(s) still listed by Meteora`);
     const balances = await getWalletBalances({ force: true }).catch((e) => ({ error: e.message }));
-    const eq = computeEquity(balances, rec.positions, unit);
+    const rentSol = await (getPositionRentSol || positionsRentSol)(rec.positions.map((p) => p.position), { fallbackPerPosition: Number(cfg.portfolioPositionRentSol ?? 0.0575) });
+    const eq = computeEquity(balances, rec.positions, unit, { rentSol });
     let st = getPortfolioState();
     const day = tradingDay(now, cfg.portfolioDayUtcOffsetHours ?? 7);
 
@@ -190,7 +216,7 @@ export async function evaluatePortfolio({ positions, getWalletBalances, executeT
     // Unit changed (config edit) -> old numbers are meaningless: re-baseline.
     if (st.unit && st.unit !== eq.unit) st = resetPortfolioBaseline({ equity: eq.equity, unit: eq.unit, now });
 
-    const patch = { last_equity: eq.equity, last_at: new Date(now).toISOString(), unit: eq.unit, sol_price: eq.sol_price };
+    const patch = { last_equity: eq.equity, last_at: new Date(now).toISOString(), unit: eq.unit, sol_price: eq.sol_price, last_rent_sol: eq.rent_sol };
     // New trading day: new day-start baseline, clear the daily block.
     if (st.day !== day || !(st.day_start_equity > 0)) {
       Object.assign(patch, { day, day_start_equity: eq.equity, day_blocked: false, day_blocked_reason: null });
@@ -292,7 +318,7 @@ export function formatGuardStatus(now = Date.now()) {
   const block = getDeployBlock(now);
   return [
     `Portfolio guard: ${cfg.portfolioGuardEnabled === false ? "DISABLED" : "on"} (${u}) | kill switch: ${killSwitchMode()}`,
-    `Equity: ${f(st.last_equity)} ${u} | day start ${f(st.day_start_equity)} (${st.day || "?"}) | peak ${f(st.peak_equity)}`,
+    `Equity: ${f(st.last_equity)} ${u} (incl. ${f(st.last_rent_sol ?? 0)} SOL refundable position rent) | day start ${f(st.day_start_equity)} (${st.day || "?"}) | peak ${f(st.peak_equity)}`,
     `Day PnL: ${dayPnl == null ? "?" : dayPnl.toFixed(2)}% (limit ${cfg.dailyLossLimitPct}%) | Drawdown: ${dd == null ? "?" : dd.toFixed(2)}% (kill ${cfg.portfolioKillSwitchPct}%)`,
     `Deploys: ${block ? `BLOCKED — ${block}` : "allowed"}`,
     `Last check: ${st.last_at || "never"}`,
@@ -304,7 +330,9 @@ export async function resetGuardNow({ getMyPositions, getWalletBalances, clearKi
   const live = await getMyPositions({ force: true, silent: true });
   if (live?.error || !Array.isArray(live?.positions)) throw new Error("Position read unavailable");
   const balances = await getWalletBalances({ force: true });
-  const eq = computeEquity(balances, live.positions, config.management.portfolioGuardUnit === "usd" ? "usd" : "sol");
+  const rec = reconcileWithTracked(live.positions, getTrackedPositions(false));
+  const rentSol = await positionsRentSol(rec.positions.map((p) => p.position), { fallbackPerPosition: Number(config.management.portfolioPositionRentSol ?? 0.0575) });
+  const eq = computeEquity(balances, rec.positions, config.management.portfolioGuardUnit === "usd" ? "usd" : "sol", { rentSol });
   if (eq.error) throw new Error(eq.error);
   resetPortfolioBaseline({ equity: eq.equity, unit: eq.unit, clearKill });
   log("portfolio", `Baseline reset to ${eq.equity.toFixed(4)} ${eq.unit.toUpperCase()}${clearKill ? " (kill switch cleared)" : ""}`);

@@ -174,6 +174,23 @@ console.log("\n[6] portfolio guard (daily loss + kill switch)");
   check("just-opened position missing from Meteora → notIndexed (not a loss)", r.notIndexed.join() === "New");
   check("closed position still listed → excluded (no double count)", r.stale.join() === "Shut" && r.positions.map((p) => p.position).join() === "Live");
   check("kill switch defaults to log-only", killSwitchMode() === "log");
+
+  // Position rent is a refundable deposit, not a loss.
+  const { positionsRentSol } = await import("../modules/portfolio-runner.js");
+  const { portfolioGuard: pg } = await import("../modules/portfolio-guard.js");
+  const before = computeEquity({ sol: 1.19, sol_price: 100, tokens: [] }, [], "sol").equity;           // 1.19
+  const live = [{ position: "P", total_value_true_usd: 50 }];                                             // 0.5 SOL in bins
+  const noRent = computeEquity({ sol: 0.6325, sol_price: 100, tokens: [] }, live, "sol").equity;          // rent missing
+  const withRent = computeEquity({ sol: 0.6325, sol_price: 100, tokens: [] }, live, "sol", { rentSol: 0.0575 }).equity;
+  check("old formula: one entry reads as ~-4.8% (rent counted as loss)", Math.abs((noRent - before) / before * 100 + 4.83) < 0.05, String((noRent - before) / before * 100));
+  check("rent added back → equity unchanged by the entry", Math.abs(withRent - before) < 1e-9);
+  const tick = (eq) => pg({ dayStartEquity: before, equity: eq, peakEquity: before }, cfg).tripped;
+  check("entry + tiny dip: old formula trips daily loss, new doesn't", tick(noRent * 0.99) === "daily_loss" && tick(withRent * 0.99) === null);
+  const fakeConn = { getMultipleAccountsInfo: async (keys) => keys.map(() => ({ lamports: 57_500_000 })) };
+  const pk1 = "So11111111111111111111111111111111111111112", pk2 = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+  check("rent read on-chain from position accounts", Math.abs(await positionsRentSol([pk1, pk2], { connection: fakeConn }) - 0.115) < 1e-9);
+  check("RPC failure → per-position fallback estimate", (await positionsRentSol([pk1, pk2], { connection: { getMultipleAccountsInfo: async () => { throw new Error("rpc"); } }, fallbackPerPosition: 0.06 })) === 0.12);
+  check("no positions → no rent", (await positionsRentSol([])) === 0);
 }
 
 console.log("\n[7] regime gate (acute rules, fail-open)");
