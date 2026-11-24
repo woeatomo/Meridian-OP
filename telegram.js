@@ -524,11 +524,14 @@ function fmtPct(value) {
 
 // ─── Meridian-OP alerts (modules/health.js ALERT_EVENTS) ───────────
 
-export async function notifyReshape({ pool_name, position, new_position, strategy, bins_above, bins_below, reshape_count, chained_pnl_pct, amount_sol, success = true, error, funds_in_wallet, in_place }) {
+export async function notifyReshape({ pool_name, position, new_position, strategy, bins_above, bins_below, reshape_count, chained_pnl_pct, amount_sol, success = true, error, funds_in_wallet, in_place, fees_compounded_usd, sol_fee_added }) {
   if (in_place && success) {
+    const fees = fees_compounded_usd > 0
+      ? `\nFees ~$${Number(fees_compounded_usd).toFixed(2)} compounded: token fee → bid-ask${sol_fee_added > 0 ? `, ${Number(sol_fee_added).toFixed(4)} SOL fee → spot below` : ""}.`
+      : "";
     await sendHTML(
       `🔁 <b>Reshape #${reshape_count ?? "?"}</b> ${escapeHtml(pool_name || position?.slice(0, 8) || "position")} → ${escapeHtml(strategy || "token bid_ask")}\n` +
-      `Token re-shaped over ${bins_above ?? 0} bins above price; SOL bins untouched (same position).`
+      `Token re-shaped over ${bins_above ?? 0} bins above price; SOL bins stay spot (same position).` + fees
     );
     return;
   }

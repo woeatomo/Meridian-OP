@@ -458,5 +458,56 @@ console.log("\n[14] token-only in-place reshape (SOL bins untouched)");
   check("nothing received → error, no deposit attempted", r.err?.withdrawn === true && !r.calls.some((c) => c.op === "add"));
 }
 
+console.log("\n[15] reshape fee compounding (token fee → bid-ask, SOL fee → spot below)");
+{
+  const { withdrawAndRedepositToken } = await import("../tools/dlmm.js");
+  const BN = (await import("bn.js")).default;
+  const { Keypair } = await import("@solana/web3.js");
+  const SPOT = 0, BIDASK = 2;
+  const run = async ({ claimFails = false, solAddFails = false, solFee = 50_000_000, walletSol = 1_000_000_000, gasReserve = 200_000_000 } = {}) => {
+    const calls = [];
+    let reads = 0;
+    const pool = {
+      removeLiquidity: async (p) => { calls.push({ op: "remove", from: p.fromBinId, to: p.toBinId }); return ["txRm"]; },
+      getActiveBin: async () => ({ binId: 94 }),
+      addLiquidityByStrategy: async (p) => {
+        const leg = p.totalXAmount.gtn(0) ? "token" : "sol";
+        calls.push({ op: "add", leg, from: p.strategy.minBinId, to: p.strategy.maxBinId, x: p.totalXAmount.toString(), y: p.totalYAmount.toString(), shape: p.strategy.strategyType });
+        if (leg === "sol" && solAddFails) throw new Error("sol add failed");
+        return "txAdd";
+      },
+      addLiquidityByStrategyChunkable: async () => ["txChunk"],
+    };
+    // before: x=1000, sol=walletSol ; after claim+withdraw: x += 5000 (withdrawn) + 700 (token fee), sol += solFee
+    const readBalances = async () => (reads++ === 0
+      ? { x: new BN(1000), sol: new BN(walletSol) }
+      : { x: new BN(1000 + 5000 + 700), sol: new BN(walletSol + solFee) });
+    const claimFees = async () => { calls.push({ op: "claim" }); if (claimFails) throw new Error("claim failed"); return ["txClaim"]; };
+    const warns = [];
+    const res = await withdrawAndRedepositToken({
+      pool, wallet: Keypair.generate(), positionPubKey: Keypair.generate().publicKey, xMint: "X", fromBin: 95, toBin: 100,
+      xStrategyType: BIDASK, sendTx: async (tx) => `sig:${tx}`, readBalances, waitMs: 0,
+      claimFees, solCompound: { fromBin: 31, strategyType: SPOT, gasReserveLamports: gasReserve, minLamports: 1_000_000 },
+      onWarn: (m) => warns.push(m),
+    });
+    return { calls, res, warns };
+  };
+  let r = await run();
+  const order = r.calls.map((c) => c.op === "add" ? `add:${c.leg}` : c.op).join(",");
+  const tok = r.calls.find((c) => c.leg === "token"), sol = r.calls.find((c) => c.leg === "sol");
+  check("order: claim → withdraw token bins → token re-deposit → SOL fee add", order === "claim,remove,add:token,add:sol", order);
+  check("token fee joins the token re-deposit (bid-ask above price)", tok.x === "5700" && tok.shape === BIDASK && tok.from === 95 && tok.to === 100);
+  check("SOL fee added as spot over the SOL bins [lower .. active]", sol.y === "50000000" && sol.x === "0" && sol.shape === SPOT && sol.from === 31 && sol.to === 94);
+  check("result reports compounded SOL", r.res.solAdded.toString() === "50000000" && r.res.claimTxs.length === 1);
+  r = await run({ claimFails: true });
+  check("claim failure → reshape still done, no SOL add, warning", !r.calls.some((c) => c.leg === "sol") && r.calls.some((c) => c.leg === "token") && r.warns.some((w) => /claim failed/.test(w)));
+  r = await run({ solAddFails: true });
+  check("SOL add failure → non-fatal (SOL stays in wallet), token reshape kept", r.res.depositTxs.length === 1 && r.res.solAdded.isZero() && r.warns.some((w) => /SOL fee compound failed/.test(w)));
+  r = await run({ walletSol: 210_000_000, solFee: 50_000_000, gasReserve: 200_000_000 });
+  check("gas reserve respected: only SOL above the reserve is added", r.calls.find((c) => c.leg === "sol")?.y === "50000000" || r.calls.find((c) => c.leg === "sol")?.y === String(260_000_000 - 200_000_000));
+  r = await run({ walletSol: 150_000_000, solFee: 50_000_000, gasReserve: 200_000_000 });
+  check("wallet at/below reserve → SOL fee not added", !r.calls.some((c) => c.leg === "sol"));
+}
+
 console.log(failed === 0 ? "\nALL TESTS PASSED" : `\n${failed} TEST(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

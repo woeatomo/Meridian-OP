@@ -41,6 +41,12 @@ tanpa swap, PnL tetap kontinu. Gagal pasang ulang → token dijual ke SOL lewat 
 tetap jalan. Konsekuensi: range SOL tidak ikut turun — kalau harga keluar dari bawah range, exit OOR
 kiri yang memutuskan.
 
+**Compound fee** (`reshapeCompoundFees: true`, default): saat reshape token-only, fee posisi diklaim dulu;
+fee token ikut dipasang ulang sebagai bid-ask di atas harga, fee SOL ditambahkan sebagai **spot** ke bin
+SOL di bawah harga (`reshapeCompoundSolTo: "spot_below"`; `"wallet"` = biarkan di wallet). Hanya bila fee
+≥ `reshapeCompoundMinUsd` (default 2× `reshapeCostUsd`). `gasReserve` tetap disisakan. Klaim gagal → reshape
+tetap jalan tanpa compound; tambah SOL gagal → SOL tetap di wallet.
+
 Mode `reshapeMode: "full"` (cara lama, posisi baru + re-centre ke bawah), eksekusinya:
 1. Rencanakan range baru dan pastikan bin array sudah ada **sebelum** menyentuh dana.
 2. Tarik semua likuiditas + klaim fee + tutup posisi, **tanpa swap**; ukur selisih saldo token & SOL.

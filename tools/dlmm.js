@@ -2306,7 +2306,7 @@ async function reshapeTokenOnly({ position_address, tracked, reason, tokenStrate
   const fromBin = activeBinId + 1;
   const toBin = pd.upperBinId;
   const binsWithToken = (pd.positionBinData || []).filter((b) => b.binId >= fromBin && b.binId <= toBin && Number(b.positionXAmount || 0) > 0).length;
-  const base = { position: position_address, new_position: position_address, in_place: true, pool: poolAddress, pool_name: tracked.pool_name || null, base_mint: xMint, strategy: `token ${tokenStrategyName} (SOL untouched)`, bins_above: Math.max(0, toBin - fromBin + 1), bins_below: 0 };
+  const base = { position: position_address, new_position: position_address, in_place: true, pool: poolAddress, pool_name: tracked.pool_name || null, base_mint: xMint, strategy: `token ${tokenStrategyName} (SOL bins stay spot)`, bins_above: Math.max(0, toBin - fromBin + 1), bins_below: 0 };
   if (fromBin > toBin || binsWithToken === 0) return { ...base, success: false, error: "No token bins above the active bin to reshape" };
 
   if (process.env.DRY_RUN === "true") {
@@ -2315,9 +2315,27 @@ async function reshapeTokenOnly({ position_address, tracked, reason, tokenStrate
   log("reshape", `Token-only reshape ${tracked.pool_name || position_address.slice(0, 8)}: bins ${fromBin}→${toBin} (${binsWithToken} with token) → ${tokenStrategyName}, SOL bins untouched — ${reason}`);
 
   const conn = getConnection();
+  // Compound fees (reshapeCompoundFees): claim first; token fee joins the token re-deposit
+  // (bid-ask above price); SOL fee goes into the SOL bins as spot (reshapeCompoundSolTo
+  // "spot_below") or stays in the wallet ("wallet"). Skipped when fees are too small.
+  const cfg = config.management;
+  const live = _positionsCache?.positions?.find((p) => p.position === position_address);
+  const unclaimedUsd = Number(live?.unclaimed_fees_true_usd ?? 0) || 0;
+  const minFeeUsd = Number(cfg.reshapeCompoundMinUsd ?? 2 * Number(cfg.reshapeCostUsd ?? 0.25));
+  const compound = cfg.reshapeCompoundFees !== false && unclaimedUsd >= minFeeUsd;
+  const solStrategyType = RESHAPE_STRATEGIES()[cfg.reshapeSolStrategy || "spot"] ?? RESHAPE_STRATEGIES().spot;
+  if (cfg.reshapeCompoundFees !== false && !compound) log("reshape", `Fees $${unclaimedUsd.toFixed(2)} < $${minFeeUsd.toFixed(2)} — reshaping without compounding`);
   let core;
   try {
-    core = await withdrawAndRedepositToken({ pool, wallet, positionPubKey, xMint, fromBin, toBin, xStrategyType, sendTx: (tx, signers) => sendAndConfirmTransaction(conn, tx, signers) });
+    core = await withdrawAndRedepositToken({
+      pool, wallet, positionPubKey, xMint, fromBin, toBin, xStrategyType,
+      sendTx: (tx, signers) => sendAndConfirmTransaction(conn, tx, signers),
+      claimFees: compound ? async () => pool.claimSwapFee({ owner: wallet.publicKey, position: await pool.getPosition(positionPubKey) }) : null,
+      solCompound: compound && (cfg.reshapeCompoundSolTo ?? "spot_below") === "spot_below"
+        ? { fromBin: pd.lowerBinId, strategyType: solStrategyType, gasReserveLamports: Math.floor((cfg.gasReserve ?? 0.2) * 1e9), minLamports: 1_000_000 }
+        : null,
+      onWarn: (m) => log("reshape_warn", m),
+    });
   } catch (e) {
     _positionsCacheAt = 0;
     if (!e.withdrawn) throw e; // nothing moved yet — a plain failure
@@ -2327,16 +2345,27 @@ async function reshapeTokenOnly({ position_address, tracked, reason, tokenStrate
     return { ...base, success: false, stage: "redeposit", funds_in_wallet: !deltaX.isZero(), withdraw_txs: e.withdrawTxs, error: `Token re-deposit failed: ${e.message}` };
   }
   _positionsCacheAt = 0;
-  const { withdrawTxs, depositTxs, deltaX, from, liveActive } = core;
+  const { withdrawTxs, depositTxs, claimTxs = [], solTxs = [], solAdded, deltaX, from, liveActive } = core;
   {
+    if (claimTxs.length) recordClaim(position_address, unclaimedUsd);
     const lineage = recordInPlaceReshape(position_address, { activeBin: liveActive, anchorTopBin: tracked.lineage?.anchor_top_bin ?? tracked.bin_range?.max ?? pd.upperBinId });
+    const solAddedSol = solAdded ? Number(solAdded.toString()) / 1e9 : 0;
+    const compoundNote = claimTxs.length
+      ? `fees ~$${unclaimedUsd.toFixed(2)} compounded (token → bid-ask${solAddedSol > 0 ? `, ${solAddedSol.toFixed(4)} SOL → spot below` : ", SOL fee kept in wallet"})`
+      : "no fee compounding";
     appendDecision({
       type: "reshape", actor: "MANAGER", pool: poolAddress, pool_name: tracked.pool_name, position: position_address,
-      summary: `In-place token reshape → ${tokenStrategyName}: bins ${from}→${toBin}, SOL bins untouched`,
-      reason, metrics: { active_bin: liveActive, amount_x_raw: deltaX.toString(), reshape_count: lineage?.reshape_count },
+      summary: `In-place token reshape → ${tokenStrategyName}: bins ${from}→${toBin}, SOL bins kept spot; ${compoundNote}`,
+      reason, metrics: { active_bin: liveActive, amount_x_raw: deltaX.toString(), sol_fee_added: solAddedSol, fees_claimed_usd: claimTxs.length ? unclaimedUsd : 0, reshape_count: lineage?.reshape_count },
     });
-    log("reshape", `SUCCESS — token re-deposited ${from}→${toBin} as ${tokenStrategyName} (${withdrawTxs.length + depositTxs.length} tx)`);
-    return { ...base, success: true, bin_range: { min: pd.lowerBinId, max: toBin, active: liveActive }, bins_above: toBin - from + 1, amount_sol: 0, amount_x_raw: deltaX.toString(), reshape_count: lineage?.reshape_count, txs: [...withdrawTxs, ...depositTxs] };
+    const txCount = claimTxs.length + withdrawTxs.length + depositTxs.length + solTxs.length;
+    log("reshape", `SUCCESS — token re-deposited ${from}→${toBin} as ${tokenStrategyName}; ${compoundNote} (${txCount} tx)`);
+    return {
+      ...base, success: true, bin_range: { min: pd.lowerBinId, max: toBin, active: liveActive }, bins_above: toBin - from + 1,
+      amount_sol: solAddedSol, amount_x_raw: deltaX.toString(), reshape_count: lineage?.reshape_count,
+      fees_compounded_usd: claimTxs.length ? unclaimedUsd : 0, sol_fee_added: solAddedSol,
+      txs: [...claimTxs, ...withdrawTxs, ...depositTxs, ...solTxs],
+    };
   }
 }
 
@@ -2349,30 +2378,65 @@ async function reshapeTokenOnly({ position_address, tracked, reason, tokenStrate
 export async function withdrawAndRedepositToken({
   pool, wallet, positionPubKey, xMint, fromBin, toBin, xStrategyType,
   sendTx, readBalances = readRawBalances, waitMs = 2000,
+  claimFees = null,   // async () => claim txs. Compound: claimed token fee joins the token re-deposit.
+  solCompound = null, // { fromBin, strategyType, gasReserveLamports, minLamports } -> claimed SOL fee added (Y-only) over [fromBin .. active]
+  onWarn = () => {},
 }) {
+  const slippage = config.standalone.enabled ? 1 : 10;
   const send = async (txs) => {
     const out = [];
     for (const tx of Array.isArray(txs) ? txs : [txs]) out.push(await sendTx(tx, [wallet]));
     return out;
   };
+  const addLiquidity = async (params) => {
+    const { minBinId, maxBinId } = params.strategy;
+    return send(maxBinId - minBinId > 69 ? await pool.addLiquidityByStrategyChunkable(params) : await pool.addLiquidityByStrategy(params));
+  };
   const before = await readBalances(wallet.publicKey, xMint);
+  // 0. Optional fee claim (non-fatal: on failure the reshape continues without compounding).
+  let claimTxs = [];
+  if (typeof claimFees === "function") {
+    try {
+      const txs = await claimFees();
+      if (txs && (!Array.isArray(txs) || txs.length)) claimTxs = await send(txs);
+    } catch (e) {
+      onWarn(`fee claim failed, reshaping without compounding: ${e.message}`);
+    }
+  }
   const withdrawTxs = await send(await pool.removeLiquidity({ user: wallet.publicKey, position: positionPubKey, fromBinId: fromBin, toBinId: toBin, bps: new BN(10000), shouldClaimAndClose: false }));
   let deltaX = new BN(0);
+  let result;
   try {
     if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
     const after = await readBalances(wallet.publicKey, xMint);
-    deltaX = BN.max(new BN(0), after.x.sub(before.x));
+    deltaX = BN.max(new BN(0), after.x.sub(before.x)); // withdrawn token + claimed token fee
     if (deltaX.isZero()) throw new Error("no token received from the withdrawn bins");
     const liveActive = (await pool.getActiveBin()).binId;
     const from = Math.max(fromBin, liveActive + 1); // price may have moved a bin meanwhile
     if (from > toBin) throw new Error("active bin moved to the top of the range — nothing to re-deposit into");
-    const params = { positionPubKey, user: wallet.publicKey, totalXAmount: deltaX, totalYAmount: new BN(0), strategy: { minBinId: from, maxBinId: toBin, strategyType: xStrategyType }, slippage: config.standalone.enabled ? 1 : 10 };
-    const depositTxs = await send(toBin - from > 69 ? await pool.addLiquidityByStrategyChunkable(params) : await pool.addLiquidityByStrategy(params));
-    return { withdrawTxs, depositTxs, deltaX, from, liveActive };
+    const depositTxs = await addLiquidity({ positionPubKey, user: wallet.publicKey, totalXAmount: deltaX, totalYAmount: new BN(0), strategy: { minBinId: from, maxBinId: toBin, strategyType: xStrategyType }, slippage });
+    result = { withdrawTxs, depositTxs, claimTxs, deltaX, from, liveActive, after, solTxs: [], solAdded: new BN(0) };
   } catch (e) {
-    Object.assign(e, { withdrawn: true, withdrawTxs, deltaX });
+    Object.assign(e, { withdrawn: true, withdrawTxs, deltaX, claimTxs });
     throw e;
   }
+
+  // 3. Optional SOL-fee compound into the SOL bins (non-fatal: the SOL simply stays in the wallet).
+  if (solCompound && claimTxs.length) {
+    const feeSol = result.after.sol.sub(before.sol); // claimed SOL fee minus tx fees so far
+    const spendable = result.after.sol.sub(new BN(String(solCompound.gasReserveLamports ?? 0)));
+    const amountY = BN.min(feeSol, spendable);
+    const to = Math.min(result.liveActive, toBin);
+    if (amountY.gte(new BN(String(solCompound.minLamports ?? 1_000_000))) && solCompound.fromBin <= to) {
+      try {
+        result.solTxs = await addLiquidity({ positionPubKey, user: wallet.publicKey, totalXAmount: new BN(0), totalYAmount: amountY, strategy: { minBinId: solCompound.fromBin, maxBinId: to, strategyType: solCompound.strategyType }, slippage });
+        result.solAdded = amountY;
+      } catch (e) {
+        onWarn(`SOL fee compound failed (SOL stays in wallet): ${e.message}`);
+      }
+    }
+  }
+  return result;
 }
 
 export async function reshapePosition({ position_address, reason = "reshape", strategy = null }) {
