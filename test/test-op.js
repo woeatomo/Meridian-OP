@@ -584,5 +584,16 @@ console.log("\n[17] entry filter (falling price / live dump)");
   check("disabled → allowed", assessEntry(slide, { entryFilterEnabled: false }).block === false);
 }
 
+console.log("\n[18] reshape trend gate");
+{
+  const { decideReshape } = await import("../modules/reshape-manager.js");
+  const base = { enabled: true, inRange: true, activeBin: 90, anchorBin: 100, lowBin10m: 90, binsDown10m: 2, pnlPct: -4, reshapesDone: 0, feesEarnedUsd: 5 };
+  check("slow dip, no trend data → RESHAPE", decideReshape(base, {}).action === "RESHAPE");
+  check("1h −5% → RESHAPE", decideReshape({ ...base, priceChange1hPct: -5 }, {}).action === "RESHAPE");
+  const d = decideReshape({ ...base, priceChange1hPct: -9 }, {});
+  check("1h −9% (downtrend) → HOLD", d.action === "HOLD" && /downtrend/.test(d.reason), d.reason);
+  check("gate off (0) → RESHAPE", decideReshape({ ...base, priceChange1hPct: -20 }, { reshapeMax1hDropPct: 0 }).action === "RESHAPE");
+}
+
 console.log(failed === 0 ? "\nALL TESTS PASSED" : `\n${failed} TEST(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

@@ -623,6 +623,32 @@ switch (subcommand) {
     break;
   }
 
+  // ── reshapes (Meridian-OP): did reshaping help? reshaped vs never-reshaped closes ───
+  case "reshapes": {
+    let perf = [];
+    try { perf = JSON.parse(fs.readFileSync(path.join(process.cwd(), "lessons.json"), "utf8")).performance || []; } catch { /* none yet */ }
+    if (!perf.length) { console.log("No closed positions recorded yet."); break; }
+    const pnlOf = (r) => Number(r.pnl_pct_own ?? r.pnl_pct);
+    const groups = { "never reshaped": perf.filter((r) => !r.reshape_count), "reshaped": perf.filter((r) => r.reshape_count > 0) };
+    const pad = (v, n) => String(v ?? "").slice(0, n).padEnd(n);
+    console.log(`${pad("group", 16)} ${pad("closes", 7)} ${pad("win %", 7)} ${pad("avg PnL %", 10)} ${pad("worst %", 9)} total PnL $`);
+    for (const [name, rows] of Object.entries(groups)) {
+      if (!rows.length) { console.log(`${pad(name, 16)} 0`); continue; }
+      const pcts = rows.map(pnlOf).filter(Number.isFinite);
+      const win = pcts.length ? (pcts.filter((x) => x > 0).length / pcts.length) * 100 : 0;
+      const avg = pcts.length ? pcts.reduce((a, b) => a + b, 0) / pcts.length : 0;
+      const total = rows.reduce((a, r) => a + (Number(r.pnl_usd) || 0), 0);
+      console.log(`${pad(name, 16)} ${pad(rows.length, 7)} ${pad(win.toFixed(0), 7)} ${pad(avg.toFixed(2), 10)} ${pad(Math.min(...pcts).toFixed(2), 9)} ${total.toFixed(2)}`);
+    }
+    const reshaped = groups.reshaped.slice(-15).reverse();
+    if (reshaped.length) {
+      console.log("\nRecent reshaped closes:");
+      for (const r of reshaped) console.log(`  ${pad(String(r.recorded_at || "").slice(0, 16).replace("T", " "), 17)} ${pad(r.pool_name, 14)} ${pad(r.reshape_count + "x", 4)} ${pad((r.pnl_pct_own != null ? r.pnl_pct_own + "*" : r.pnl_pct), 8)} ${r.close_reason || "?"}`);
+    }
+    console.log("\nPnL % with * = own SOL PnL; older rows use Meteora %, which looks better than reality after reshapes.");
+    break;
+  }
+
   // ── performance ──────────────────────────────────────────────────
   case "performance": {
     const { getPerformanceHistory, getPerformanceSummary } = await import("./lessons.js");

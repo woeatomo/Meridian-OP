@@ -184,6 +184,7 @@ export const config = {
     evolveMinCloses:         u.evolveMinCloses         ?? 20,
     // Meridian-OP: Reshape (modules/reshape-manager.js) — satu arah ke bawah, Spot -> Bid-Ask.
     reshapeEnabled:         u.reshapeEnabled         ?? false,
+    reshapeMax1hDropPct:    u.reshapeMax1hDropPct    ?? 8,     // no reshape when price fell >= X% in 1h
     reshapeStrategy:        u.reshapeStrategy        ?? "bid_ask", // legacy alias for reshapeTokenStrategy
     reshapeTokenStrategy:   u.reshapeTokenStrategy   ?? u.reshapeStrategy ?? "bid_ask", // token above price
     reshapeSolStrategy:     u.reshapeSolStrategy     ?? "spot",    // SOL below price (reshapeMode "full" only)

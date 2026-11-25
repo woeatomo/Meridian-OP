@@ -6,6 +6,8 @@ import { config } from "../config.js";
 import { log } from "../logger.js";
 import { getTrackedPosition } from "../state.js";
 import { decideReshape, confirmReshape, clearReshapePending, reshapeInputFromPosition } from "./reshape-manager.js";
+import { fetchPoolCandles } from "./dump-detector.js";
+import { priceChangeFromCandles } from "./entry-filter.js";
 
 const lastReason = new Map(); // position -> alasan terakhir (log hanya bila berubah)
 const inflight = new Set();
@@ -15,7 +17,7 @@ const dryRunAt = new Map(); // DRY_RUN or failed attempt: lineage unchanged, so 
  * Evaluasi + eksekusi reshape untuk satu posisi teranotasi (output getMyPositions).
  * Return hasil executeTool bila reshape dijalankan, null bila tidak.
  */
-export async function maybeReshape(p, { hasExitSignal = false, executeTool, now = Date.now() } = {}) {
+export async function maybeReshape(p, { hasExitSignal = false, executeTool, now = Date.now(), getCandles = fetchPoolCandles } = {}) {
   const cfg = config.management;
   if (cfg.reshapeEnabled !== true || !p?.position || inflight.has(p.position)) return null;
   const tracked = getTrackedPosition(p.position);
@@ -23,7 +25,14 @@ export async function maybeReshape(p, { hasExitSignal = false, executeTool, now 
   const lastDry = dryRunAt.get(p.position);
   if (lastDry && now - lastDry < (cfg.reshapeCooldownMinutes ?? 45) * 60_000) return null;
 
-  const decision = decideReshape(reshapeInputFromPosition(p, tracked, cfg, { hasExitSignal, now }), cfg);
+  const input = reshapeInputFromPosition(p, tracked, cfg, { hasExitSignal, now });
+  let decision = decideReshape(input, cfg);
+  // Trend gate needs candles: fetch only when everything else already says RESHAPE (cached 60s).
+  if (decision.action === "RESHAPE" && Number(cfg.reshapeMax1hDropPct ?? 8) > 0 && p.pool) {
+    const candles = await getCandles(p.pool).catch(() => null);
+    input.priceChange1hPct = priceChangeFromCandles(candles, 60);
+    decision = decideReshape(input, cfg);
+  }
   const wants = decision.action === "RESHAPE";
   // Log on a change of KIND of reason, not every time a number in it moves (fees tick up every poll).
   const reasonKind = `${decision.action}:${decision.reason.replace(/[-+$]?\d[\d.,]*%?/g, "#")}`;

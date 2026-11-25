@@ -42,6 +42,10 @@ dan saat PnL ≤ −90% dengan nilai posisi ~0 (data Meteora belum siap), aturan
 
 ### Reshape (Spot → Bid-Ask, satu arah ke bawah)
 
+`reshapeMax1hDropPct` (8): reshape tidak jalan kalau harga turun ≥8% dalam 1 jam. Reshape memindahkan token ke bin
+yang lebih tinggi = taruhan harga akan rebound; di token yang sedang turun terus taruhan itu kalah.
+`node cli.js reshapes` membandingkan hasil posisi yang pernah di-reshape vs yang tidak.
+
 Dievaluasi di poller cepat (tiap `pnlPollIntervalSec`) hanya bila **tidak ada sinyal exit**.
 Syarat RESHAPE (semua harus terpenuhi):
 - `reshapeEnabled: true`, posisi masih in range, PnL bisa dihitung;

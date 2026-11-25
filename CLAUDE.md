@@ -444,6 +444,8 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
 - **Trailing after TP1**: with `partialTpEnabled` + `trailingAfterTp1` (default), trailing only arms once `partial_tp.tp1_done`.
 - **Evolve gate**: `evolveThresholds` only runs at ≥ `evolveMinCloses` (20) closes and uses `pnl_pct_own` when present.
   Jupiter referral fee defaults to 0 bps (env `JUPITER_REFERRAL_FEE_BPS` to re-enable).
+- **Reshape trend gate**: `decideReshape` holds when the pool's 1h price change ≤ −`reshapeMax1hDropPct` (8); the runner
+  fetches candles only once every other guard already says RESHAPE. `cli.js reshapes` compares reshaped vs never-reshaped closes.
 - **Dump history persistence**: `enableHistoryPersistence(repoPath("dump-history.json"))` in both runtimes' start.
 - Tests: `npm run test:op` (pure, no network).
 

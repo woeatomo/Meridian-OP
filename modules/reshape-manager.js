@@ -52,6 +52,12 @@ export function decideReshape(p, cfg = {}) {
   if (p.lowBin10m != null && p.activeBin > p.lowBin10m + reboundTol) {
     return hold(`rebounding (${p.activeBin - p.lowBin10m} bins above 10m low) — no reshape on bounce`);
   }
+  // Reshape moves bought token to higher bins = a bet on a rebound. In a steady 1h downtrend
+  // (memecoin bleeding out) that bet loses, so only reshape a chop / mild dip.
+  const max1hDrop = Number(cfg.reshapeMax1hDropPct ?? 8);
+  if (max1hDrop > 0 && p.priceChange1hPct != null && p.priceChange1hPct <= -max1hDrop) {
+    return hold(`downtrend: price ${p.priceChange1hPct}% in 1h (limit −${max1hDrop}%) — no rebound bet`);
+  }
   if (p.pnlPct != null && p.pnlPct <= minPnl) return hold(`PnL ${p.pnlPct}% <= ${minPnl}% — too close to stop loss, let SL decide`);
   if (costUsd > 0 && (p.feesEarnedUsd ?? 0) < costMult * costUsd) {
     return hold(`fees $${(p.feesEarnedUsd ?? 0).toFixed(2)} < ${costMult}x reshape cost $${costUsd} — not economical`);

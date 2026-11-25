@@ -483,6 +483,7 @@ const toolMap = {
       entryBlockOnDump: ["management", "entryBlockOnDump"],
       pumpCloseCooldownHours: ["management", "pumpCloseCooldownHours"],
       trailingAfterTp1: ["management", "trailingAfterTp1"],
+      reshapeMax1hDropPct: ["management", "reshapeMax1hDropPct"],
       evolveMinCloses: ["management", "evolveMinCloses"],
       partialTpEnabled: ["management", "partialTpEnabled"],
       partialTp1Pct: ["management", "partialTp1Pct"],
