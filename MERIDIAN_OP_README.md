@@ -230,6 +230,10 @@ cd ~/Meridian-OP && npm install && npm run test:op
 7. Live: ubah `shadowMode` ke `false` di `user-config.json`, `npm run pm2:restart`, lalu
    `node cli.js guard --reset`.
 
+Daily loss limit sudah memblok lalu kamu longgarkan (mis. −5 → −10)? Setelah `npm run pm2:restart`, cek berikutnya
+menghitung ulang rugi hari ini terhadap limit baru dan membuka blok kalau masih di dalam limit. Buka manual:
+`node cli.js guard --unblock` (baseline tidak direset; kalau rugi masih melewati limit, besoknya/cek berikutnya blok lagi).
+
 Update berikutnya: `git pull origin op-v2 && npm install && npm run init:config && npm run pm2:restart`
 (`init:config` hanya menambah key baru, setelanmu tidak ditimpa).
 

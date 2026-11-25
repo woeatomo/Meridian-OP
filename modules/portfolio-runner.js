@@ -257,6 +257,20 @@ export async function evaluatePortfolio({ positions, getWalletBalances, getPosit
     } else if (!(st.peak_equity > 0) || eq.equity > st.peak_equity) {
       patch.peak_equity = eq.equity;
     }
+    // Daily limit loosened after the day was blocked (e.g. -5% -> -10%): re-check against the
+    // new limit and lift the block when today's loss is now within it.
+    const limitNow = Number(cfg.dailyLossLimitPct);
+    if (st.day_blocked && patch.day_blocked !== false && Number.isFinite(limitNow) && Number(st.day_blocked_limit) !== limitNow) {
+      const dayPnlPct = st.day_start_equity > 0 ? ((dailyEquity - st.day_start_equity) / st.day_start_equity) * 100 : null;
+      if (dayPnlPct != null && dayPnlPct > limitNow) {
+        Object.assign(patch, { day_blocked: false, day_blocked_reason: null, day_blocked_limit: null });
+        confirmStreak("daily", false, now);
+        log("portfolio", `Daily loss limit changed to ${limitNow}%: today ${dayPnlPct.toFixed(2)}% is within it — deploys resume`);
+        notify?.("DAILY_LOSS_LIMIT", `Daily loss limit now ${limitNow}% — today ${dayPnlPct.toFixed(2)}% is within it, entries resume.`);
+      } else {
+        patch.day_blocked_limit = limitNow; // still over the new limit: stay blocked, don't re-check every tick
+      }
+    }
     st = savePortfolioState(patch);
 
     const guardInput = {
@@ -298,7 +312,7 @@ export async function evaluatePortfolio({ positions, getWalletBalances, getPosit
     decision.unit = eq.unit;
 
     if (decision.tripped === "daily_loss" && !st.day_blocked && streaks.daily.count >= (cfg.dailyLossConfirmChecks ?? 2)) {
-      savePortfolioState({ day_blocked: true, day_blocked_reason: decision.reason });
+      savePortfolioState({ day_blocked: true, day_blocked_reason: decision.reason, day_blocked_limit: Number(cfg.dailyLossLimitPct) });
       log("portfolio_warn", `DAILY LOSS LIMIT: ${decision.reason}`);
       notify?.("DAILY_LOSS_LIMIT", `${decision.reason}\n${basis === "realized" ? "Realized equity" : "Equity"} ${dailyEquity.toFixed(4)} ${eq.unit.toUpperCase()} (day start ${st.day_start_equity.toFixed(4)}). Existing positions keep being managed.`);
     }
@@ -351,6 +365,15 @@ export function formatGuardStatus(now = Date.now()) {
     `Deploys: ${block ? `BLOCKED — ${block}` : "allowed"}`,
     `Last check: ${st.last_at || "never"}`,
   ].join("\n");
+}
+
+/** Lift today's daily-loss block only (baselines untouched). Re-blocks if the loss is still over the limit. */
+export function unblockDailyLoss() {
+  const st = getPortfolioState();
+  savePortfolioState({ day_blocked: false, day_blocked_reason: null, day_blocked_limit: null });
+  confirmStreak("daily", false, Date.now());
+  log("portfolio", `Daily loss block lifted manually${st.day_blocked ? "" : " (was not blocked)"}`);
+  return formatGuardStatus();
 }
 
 /** Reset baseline ke ekuitas sekarang (setelah deposit / withdraw manual). */

@@ -754,9 +754,11 @@ switch (subcommand) {
 
   // ── guard (Meridian-OP portfolio guard) ───────────────────────
   case "guard": {
-    const { formatGuardStatus, resetGuardNow } = await import("./modules/portfolio-runner.js");
+    const { formatGuardStatus, resetGuardNow, unblockDailyLoss } = await import("./modules/portfolio-runner.js");
     const reset = argv.includes("--reset");
-    if (reset) {
+    if (argv.includes("--unblock")) {
+      console.log(unblockDailyLoss());
+    } else if (reset) {
       const { getMyPositions } = await import("./tools/dlmm.js");
       const { getWalletBalances } = await import("./tools/wallet.js");
       console.log(await resetGuardNow({ getMyPositions, getWalletBalances, clearKill: argv.includes("--clear-kill") }));

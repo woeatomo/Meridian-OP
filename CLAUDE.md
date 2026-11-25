@@ -414,7 +414,8 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
   `state.json portfolio`. `evaluatePortfolio` runs in both management cycles and (throttled, `portfolioGuardCheckSec`)
   in the fast pollers; a kill-switch trip closes every position via `executeTool("close_position")`. The deploy gate is
   `getDeployBlock()` in `runSafetyChecks(deploy_position)` + early skips in the screening paths. Manual
-  deposits/withdrawals need `cli.js guard --reset`.
+  deposits/withdrawals need `cli.js guard --reset`. Loosening `dailyLossLimitPct` after a block re-checks today's loss
+  (`day_blocked_limit`) and lifts the block if it is now within the limit; `cli.js guard --unblock` lifts it manually.
 - **Regime gate** (`modules/regime-runner.js`): `regimeDeployGate()` in `runSafetyChecks(deploy_position)`; mode
   `regimeGateMode` = off | log (default, flags `state.positions[addr].regime_flag` + decision-log `regime_flag`) |
   enforce. Acute rules only by default; fail-open on missing market data. `cli.js regime` reports flagged vs normal.
