@@ -173,6 +173,15 @@ export const config = {
     // Meridian-OP: max Emergency SL per token per hari -> cooldown token.
     emergencySlMaxPerTokenPerDay: u.emergencySlMaxPerTokenPerDay ?? 2,
     emergencySlCooldownHours:     u.emergencySlCooldownHours     ?? 24,
+    // Meridian-OP: entry filter (modules/entry-filter.js) + pump-close cooldown.
+    entryFilterEnabled:      u.entryFilterEnabled      ?? true,
+    entryMaxDrop1hPct:       u.entryMaxDrop1hPct       ?? 10,   // no entry if price fell >= X% in 1h
+    entryBlockOnDump:        u.entryBlockOnDump        ?? true, // no entry during a 15m dump
+    pumpCloseCooldownHours:  u.pumpCloseCooldownHours  ?? 2,    // pool+token cooldown after a pump close
+    // Meridian-OP: trailing TP only arms after partial TP1 (when partial TP is on).
+    trailingAfterTp1:        u.trailingAfterTp1        ?? true,
+    // Meridian-OP: evolveThresholds waits for this many closed positions.
+    evolveMinCloses:         u.evolveMinCloses         ?? 20,
     // Meridian-OP: Reshape (modules/reshape-manager.js) — satu arah ke bawah, Spot -> Bid-Ask.
     reshapeEnabled:         u.reshapeEnabled         ?? false,
     reshapeStrategy:        u.reshapeStrategy        ?? "bid_ask", // legacy alias for reshapeTokenStrategy
@@ -382,7 +391,7 @@ export const config = {
       process.env.JUPITER_REFERRAL_ACCOUNT ??
       "9MzhDUnq3KxecyPzvhguQMMPbooXQ3VAoCMPDnoijwey",
     referralFeeBps: Number(
-      process.env.JUPITER_REFERRAL_FEE_BPS ?? 50,
+      process.env.JUPITER_REFERRAL_FEE_BPS ?? 0, // Meridian-OP: no referral fee by default
     ),
   },
 

@@ -1,3 +1,4 @@
+import { checkEntry } from "../modules/entry-filter.js";
 import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
 import {
   getActiveBin,
@@ -477,6 +478,12 @@ const toolMap = {
       portfolioPositionRentSol: ["management", "portfolioPositionRentSol"],
       pnlBasis: ["management", "pnlBasis"],
       pnlGraceMinutes: ["management", "pnlGraceMinutes"],
+      entryFilterEnabled: ["management", "entryFilterEnabled"],
+      entryMaxDrop1hPct: ["management", "entryMaxDrop1hPct"],
+      entryBlockOnDump: ["management", "entryBlockOnDump"],
+      pumpCloseCooldownHours: ["management", "pumpCloseCooldownHours"],
+      trailingAfterTp1: ["management", "trailingAfterTp1"],
+      evolveMinCloses: ["management", "evolveMinCloses"],
       partialTpEnabled: ["management", "partialTpEnabled"],
       partialTp1Pct: ["management", "partialTp1Pct"],
       partialTp1Fraction: ["management", "partialTp1Fraction"],
@@ -947,6 +954,9 @@ async function runSafetyChecks(name, args) {
       });
       if (regime?.block) return { pass: false, reason: `Regime gate: ${regime.reason}` };
       if (regime?.wouldBlock) args._regime_flag = regime.flag;
+      // Meridian-OP entry filter: don't buy into a token that is falling right now.
+      const entry = await checkEntry(args.pool_address);
+      if (entry.block) return { pass: false, reason: `Entry filter: ${entry.reason}` };
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;
       if (poolThresholds.entryMarketData) Object.assign(args, poolThresholds.entryMarketData);

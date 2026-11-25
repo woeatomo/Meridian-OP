@@ -193,6 +193,16 @@ export function recordPoolDeploy(poolAddress, deployData) {
     }
   }
 
+  // Meridian-OP: closed because the price pumped above range -> don't chase it straight back in
+  // at the top (the exit data showed the same pools re-entered 20+ times after pump closes).
+  const pumpHours = Math.max(0, Number(config.management.pumpCloseCooldownHours ?? 2));
+  if (pumpHours > 0 && /pump/i.test(String(deploy.close_reason || ""))) {
+    const reason = "closed on pump above range";
+    const until = setPoolCooldown(entry, pumpHours, reason);
+    if (entry.base_mint) setBaseMintCooldown(db, entry.base_mint, pumpHours, reason);
+    log("pool-memory", `Pump-close cooldown for ${entry.name} until ${until}`);
+  }
+
   // Meridian-OP: N Emergency SL dalam 24 jam pada token yang sama -> cooldown token.
   if (/emergency/i.test(String(deploy.close_reason || "")) && entry.base_mint) {
     const maxPerDay = Math.max(1, Number(config.management.emergencySlMaxPerTokenPerDay ?? 2));

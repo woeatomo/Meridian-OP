@@ -566,5 +566,23 @@ console.log("\n[16] own SOL PnL (not diluted by reshape) + unreliable-tick guard
   check("normal tick → reliable", pnlUnreliable({ pnl_pct: 3, total_value_sol: 0.5 }, { deployed_at: old }) === null);
 }
 
+console.log("\n[17] entry filter (falling price / live dump)");
+{
+  const { assessEntry, priceChangeFromCandles } = await import("../modules/entry-filter.js");
+  const mk = (closes, vols = null) => closes.map((c, i) => ({ ts: i, open: i ? closes[i - 1] : c, close: c, volume: vols ? vols[i] : 100 }));
+  const flat = mk(Array.from({ length: 24 }, () => 1));
+  check("flat price → entry allowed", assessEntry(flat, {}).block === false);
+  const slide = mk(Array.from({ length: 24 }, (_, i) => (i < 12 ? 1 : 1 - (i - 11) * 0.01)));
+  check("1h change computed from 5m candles", priceChangeFromCandles(slide, 60) === -12);
+  check("−12% in 1h → blocked", assessEntry(slide, { entryMaxDrop1hPct: 10 }).block === true);
+  check("−12% in 1h but limit 15 → allowed", assessEntry(slide, { entryMaxDrop1hPct: 15, entryBlockOnDump: false }).block === false);
+  const dumpCloses = [...Array.from({ length: 21 }, () => 1), 0.98, 0.95, 0.93];
+  const dumpVols = [...Array.from({ length: 21 }, () => 100), 400, 500, 600];
+  const d = assessEntry(mk(dumpCloses, dumpVols), { entryMaxDrop1hPct: 50 });
+  check("−7% in 15m + heavy red candles → blocked as dump", d.block === true && /dump/.test(d.reason), JSON.stringify(d));
+  check("no candles → fail-open", assessEntry(null, {}).block === false);
+  check("disabled → allowed", assessEntry(slide, { entryFilterEnabled: false }).block === false);
+}
+
 console.log(failed === 0 ? "\nALL TESTS PASSED" : `\n${failed} TEST(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

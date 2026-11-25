@@ -678,6 +678,21 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via dev blocklist`);
   }
 
+  // Meridian-OP entry filter: drop candidates whose price is falling right now (1h drop / live dump).
+  if (config.management.entryFilterEnabled !== false && eligible.length > 0) {
+    const { checkEntry } = await import("../modules/entry-filter.js");
+    const results = await Promise.all(eligible.map((p) => checkEntry(p.pool)));
+    const kept = eligible.filter((p, i) => {
+      const r = results[i];
+      if (r.price_change_1h_pct != null) p.price_change_1h_pct = r.price_change_1h_pct;
+      if (!r.block) return true;
+      pushFilteredReason(filteredOut, p, `entry filter: ${r.reason}`);
+      log("screening", `Entry filter removed ${p.name} (${p.pool.slice(0, 8)}): ${r.reason}`);
+      return false;
+    });
+    eligible.splice(0, eligible.length, ...kept);
+  }
+
   if (config.indicators.enabled && eligible.length > 0) {
     const confirmations = await Promise.all(
       eligible.map(async (pool) => {

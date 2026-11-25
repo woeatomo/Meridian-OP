@@ -188,7 +188,9 @@ export async function recordPerformance(perf) {
   // Evolve thresholds every 5 closed positions
   if (!config.standalone.enabled && data.performance.length % MIN_EVOLVE_POSITIONS === 0) {
     const { config, reloadScreeningThresholds } = await import("./config.js");
-    const result = evolveThresholds(data.performance, config);
+    // Meridian-OP: don't move screening thresholds on a handful of trades.
+    const minCloses = Math.max(MIN_EVOLVE_POSITIONS, Number(config.management?.evolveMinCloses ?? 20));
+    const result = data.performance.length >= minCloses ? evolveThresholds(data.performance, config) : null;
     if (result?.changes && Object.keys(result.changes).length > 0) {
       reloadScreeningThresholds();
       log("evolve", `Auto-evolved thresholds: ${JSON.stringify(result.changes)}`);
@@ -334,8 +336,10 @@ function derivLesson(perf) {
 export function evolveThresholds(perfData, config) {
   if (!perfData || perfData.length < MIN_EVOLVE_POSITIONS) return null;
 
-  const winners = perfData.filter((p) => p.pnl_pct > 0);
-  const losers  = perfData.filter((p) => p.pnl_pct < -5);
+  // Meridian-OP: prefer own SOL PnL (not diluted by reshape re-deposits) when recorded.
+  const pnlOf = (p) => (p.pnl_pct_own ?? p.pnl_pct);
+  const winners = perfData.filter((p) => pnlOf(p) > 0);
+  const losers  = perfData.filter((p) => pnlOf(p) < -5);
 
   // Need at least some signal in both directions before adjusting
   const hasSignal = winners.length >= 2 || losers.length >= 2;

@@ -546,7 +546,8 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   let changed = false;
 
   // Activate trailing TP once trigger threshold is reached
-  if (mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= mgmtConfig.trailingTriggerPct) {
+  const trailingGateOpen = !(mgmtConfig.partialTpEnabled && mgmtConfig.trailingAfterTp1 !== false) || !!pos.partial_tp?.tp1_done;
+  if (mgmtConfig.trailingTakeProfit && trailingGateOpen && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= mgmtConfig.trailingTriggerPct) {
     pos.trailing_active = true;
     changed = true;
     log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%)`);

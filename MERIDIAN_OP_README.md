@@ -30,6 +30,16 @@ baru jalan di −30%). Juga tidak terpengaruh naik-turunnya harga SOL. `pnlGrace
 dan saat PnL ≤ −90% dengan nilai posisi ~0 (data Meteora belum siap), aturan PnL tidak bertindak — mencegah
 "Stop loss −100%" di menit ke-0. `node cli.js exits` menandai PnL versi baru dengan `*`.
 
+### Filter entry + cooldown setelah pump
+
+- `entryFilterEnabled` (true): tidak deploy kalau harga turun ≥ `entryMaxDrop1hPct` (10%) dalam 1 jam, atau sedang
+  dump 15 menit (`entryBlockOnDump`). Data dari candle 5m pool; kalau candle tidak tersedia, filter dilewati.
+- `pumpCloseCooldownHours` (2): setelah posisi ditutup karena pump di atas range, pool + token itu cooldown 2 jam
+  supaya bot tidak masuk lagi di pucuk.
+- `trailingAfterTp1` (true): kalau partial TP aktif, trailing baru menyala setelah TP1 terjual.
+- `evolveMinCloses` (20): auto-evolve threshold screening baru jalan setelah 20 posisi tertutup.
+- Referral fee Jupiter default 0 (sebelumnya 0,5% per swap).
+
 ### Reshape (Spot → Bid-Ask, satu arah ke bawah)
 
 Dievaluasi di poller cepat (tiap `pnlPollIntervalSec`) hanya bila **tidak ada sinyal exit**.

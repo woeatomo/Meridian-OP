@@ -437,6 +437,13 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
   `pnl_sol`) / cost_basis_sol. Meteora's % is diluted by withdraw+re-deposit (reshape/compound) — never use it for rules.
   `pnl_pct_raw` keeps Meteora's %. Ticks inside `pnlGraceMinutes` after deploy/reshape, or ≤ −90% with ~zero value, get
   `pnl_pct = null` + `pnl_pct_suspicious` so no PnL rule (SL/TP/trailing/peak/partial/reshape) acts. Basis switch resets peaks.
+- **Entry filter** (`modules/entry-filter.js`, `entryFilterEnabled`): from pool 5m candles, no entry if price fell
+  ≥ `entryMaxDrop1hPct` (10) in 1h or a 15m dump is live (`entryBlockOnDump`). Applied in `getTopCandidates` and in
+  `runSafetyChecks(deploy_position)`; fail-open without candles. A close whose reason matches /pump/ sets a
+  `pumpCloseCooldownHours` (2) pool+token cooldown (`pool-memory.js`).
+- **Trailing after TP1**: with `partialTpEnabled` + `trailingAfterTp1` (default), trailing only arms once `partial_tp.tp1_done`.
+- **Evolve gate**: `evolveThresholds` only runs at ≥ `evolveMinCloses` (20) closes and uses `pnl_pct_own` when present.
+  Jupiter referral fee defaults to 0 bps (env `JUPITER_REFERRAL_FEE_BPS` to re-enable).
 - **Dump history persistence**: `enableHistoryPersistence(repoPath("dump-history.json"))` in both runtimes' start.
 - Tests: `npm run test:op` (pure, no network).
 
