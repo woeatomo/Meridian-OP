@@ -211,6 +211,8 @@ export const config = {
     portfolioSettleSec:     u.portfolioSettleSec     ?? 120,   // skip equity checks right after a transaction
     portfolioIndexGraceMin: u.portfolioIndexGraceMin ?? 10,    // new position not yet listed by Meteora -> skip, not a loss
     portfolioPositionRentSol: u.portfolioPositionRentSol ?? 0.0575, // fallback rent per position if the on-chain read fails
+    pnlBasis:               u.pnlBasis               ?? "own_sol", // "own_sol": PnL % = absolute SOL PnL / SOL committed (not diluted by reshape) | "meteora": legacy
+    pnlGraceMinutes:        u.pnlGraceMinutes        ?? 3,         // PnL rules ignore a position for N minutes after deploy/reshape
     // Meridian-OP: Partial TP (modules/partial-tp.js). Saat aktif, TP penuh pindah ke partialTpFinalPct.
     partialTpEnabled:       u.partialTpEnabled       ?? false,
     partialTp1Pct:          u.partialTp1Pct          ?? 5,

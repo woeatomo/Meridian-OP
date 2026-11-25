@@ -21,6 +21,15 @@ pernah dipanggil).
 | 11 | **Riwayat detektor dump tersimpan** di `dump-history.json` (tiap 30 dtk + saat shutdown); dipulihkan saat start (data > 45 mnt dibuang). Restart tidak lagi membuat bot "buta" dump. | `modules/dump-detector.js` |
 | 12 | **RPC failover multi-endpoint** — daftar RPC dari `RPC_URL` + `rpc-endpoints.json` (contoh: `rpc-endpoints.example.json`, dibaca ulang otomatis tanpa restart) + `RPC_URLS` + `FALLBACK_RPC_URL`. Semua request (kirim tx, pool, saldo, PnL, monitor wallet) memakai endpoint aktif. HTTP 429 → endpoint diistirahatkan 60 dtk dan langsung pindah; 3 error 5xx/timeout dalam 30 dtk → istirahat 120 dtk dan pindah; probe getSlot hemat (aktif tiap 15 dtk, cadangan tiap 60 dtk). Kembali ke `RPC_URL` setelah sehat 3x. Semua mati > 60 dtk → **safe mode** (deploy & reshape diblokir, close tetap dicoba). `node cli.js rpc` / `/rpc` untuk status. URL tidak pernah di-log. | `modules/rpc-health.js`, `standalone/rpc.js` |
 
+### PnL yang dipakai aturan exit (`pnlBasis: "own_sol"`)
+
+Semua aturan (SL, Emergency SL, TP, trailing, partial TP, reshape) memakai **PnL sendiri dalam SOL**:
+PnL absolut (SOL, dari Meteora: nilai + fee + penarikan − deposit) ÷ SOL yang benar-benar di-deploy.
+Persentase Meteora tidak dipakai lagi karena terencerkan oleh deposit ulang saat reshape/compound (SL −15% bisa
+baru jalan di −30%). Juga tidak terpengaruh naik-turunnya harga SOL. `pnlGraceMinutes` (3): setelah deploy/reshape,
+dan saat PnL ≤ −90% dengan nilai posisi ~0 (data Meteora belum siap), aturan PnL tidak bertindak — mencegah
+"Stop loss −100%" di menit ke-0. `node cli.js exits` menandai PnL versi baru dengan `*`.
+
 ### Reshape (Spot → Bid-Ask, satu arah ke bawah)
 
 Dievaluasi di poller cepat (tiap `pnlPollIntervalSec`) hanya bila **tidak ada sinyal exit**.

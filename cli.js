@@ -608,8 +608,10 @@ switch (subcommand) {
     for (const r of rows) {
       const held = r.minutes_held != null ? `${Math.round(r.minutes_held)}m` : "?";
       const extra = r.reshape_count ? ` (after ${r.reshape_count} reshape)` : "";
-      console.log(`${pad(String(r.recorded_at || "").replace("T", " ").slice(0, 16), 17)} ${pad(r.pool_name || String(r.pool || "").slice(0, 8), 14)} ${pad(r.pnl_pct, 8)} ${pad(r.pnl_usd, 9)} ${pad(held, 7)} ${r.close_reason || "?"}${extra}`);
+      const pct = r.pnl_pct_own != null ? `${r.pnl_pct_own}*` : r.pnl_pct;
+      console.log(`${pad(String(r.recorded_at || "").replace("T", " ").slice(0, 16), 17)} ${pad(r.pool_name || String(r.pool || "").slice(0, 8), 14)} ${pad(pct, 8)} ${pad(r.pnl_usd, 9)} ${pad(held, 7)} ${r.close_reason || "?"}${extra}`);
     }
+    if (rows.some((r) => r.pnl_pct_own != null)) console.log("* = own PnL in SOL vs SOL committed (accurate after reshapes); others = Meteora %, diluted by reshape re-deposits");
     const byReason = {};
     for (const r of perf) {
       const key = String(r.close_reason || "?").replace(/\(.*$/, "").replace(/[-+]?\d[\d.,]*%?/g, "#").trim().slice(0, 40);

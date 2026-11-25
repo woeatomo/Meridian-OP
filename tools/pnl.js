@@ -233,6 +233,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     collected_fees_true_usd: round(claimedUsd),
     pnl_usd:            round(solMode ? pnlSol : pnlUsd),
     pnl_true_usd:       round(pnlUsd),
+    pnl_sol:            Number.isFinite(Number(pnlSol)) ? Math.round(Number(pnlSol) * 1e6) / 1e6 : null,
+    total_value_sol:    Number.isFinite(Number(balancesSol)) ? Math.round(Number(balancesSol) * 1e6) / 1e6 : null,
     pnl_pct:            round(ourPct, 2),
     pnl_pct_derived:    round(ourPct, 2),
     pnl_pct_diff:       pnlPctDiff != null ? round(pnlPctDiff, 2) : null,

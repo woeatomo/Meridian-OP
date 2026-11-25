@@ -475,6 +475,8 @@ const toolMap = {
       portfolioSettleSec: ["management", "portfolioSettleSec"],
       portfolioIndexGraceMin: ["management", "portfolioIndexGraceMin"],
       portfolioPositionRentSol: ["management", "portfolioPositionRentSol"],
+      pnlBasis: ["management", "pnlBasis"],
+      pnlGraceMinutes: ["management", "pnlGraceMinutes"],
       partialTpEnabled: ["management", "partialTpEnabled"],
       partialTp1Pct: ["management", "partialTp1Pct"],
       partialTp1Fraction: ["management", "partialTp1Fraction"],

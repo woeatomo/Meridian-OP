@@ -1382,6 +1382,16 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
             : binData
             ? Math.round(parseFloat(binData.pnlUsd || 0) * 10000) / 10000
             : null,
+          // Meridian-OP: absolute PnL / value in SOL — basis for our own PnL % (modules/position-annotate.js).
+          // Absolute PnL is not diluted by withdraw + re-deposit (reshape / compound), unlike Meteora's %.
+          pnl_sol:            lpData
+            ? (Number.isFinite(Number(lpData.pnl?.valueNative)) ? Math.round(Number(lpData.pnl.valueNative) * 1e6) / 1e6 : null)
+            : binData && binData.pnlSol != null && Number.isFinite(Number(binData.pnlSol))
+            ? Math.round(Number(binData.pnlSol) * 1e6) / 1e6
+            : null,
+          total_value_sol:    binData && binData.unrealizedPnl?.balancesSol != null
+            ? Math.round(parseFloat(binData.unrealizedPnl.balancesSol || 0) * 1e6) / 1e6
+            : (lpData ? safeNum(lpData.valueNative) : null),
           pnl_pct:            (lpData || binData)
             ? Math.round(reportedPnlPct * 100) / 100
             : null,
@@ -1578,7 +1588,17 @@ export async function claimFees({ position_address }) {
  * pool-memory judge the trade, not the last re-deposit. Falls back to
  * deposits / pnl_factor when the original USD value wasn't recorded.
  */
+// Meridian-OP: last annotated snapshot of a position, captured just before close (the post-close
+// refresh drops it from the cache), so performance records carry our own SOL PnL.
+const _preCloseLive = new Map();
+
 function withLineagePerformance(tracked, perf) {
+  const pre = _preCloseLive.get(perf.position);
+  _preCloseLive.delete(perf.position);
+  if (pre && pre.pnl_basis === "own_sol") {
+    const own = pre.pnl_pct ?? pre.pnl_pct_unconfirmed;
+    if (Number.isFinite(Number(own))) perf = { ...perf, pnl_pct_own: Number(own), pnl_sol_own: pre.pnl_sol ?? null };
+  }
   const lin = tracked?.lineage;
   if (!lin) return perf;
   const startedAt = new Date(lin.started_at).getTime();
@@ -1603,6 +1623,8 @@ export async function closePosition({ position_address, reason }) {
   if (process.env.DRY_RUN === "true") {
     return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
   }
+  const preLive = _positionsCache?.positions?.find((p) => p.position === position_address);
+  if (preLive) _preCloseLive.set(position_address, preLive);
 
   const tracked = getTrackedPosition(position_address);
 
@@ -2606,6 +2628,9 @@ export async function reshapePosition({ position_address, reason = "reshape", st
     anchor_top_bin: anchorTop,
     last_reshape_at: new Date().toISOString(),
     last_reshape_bin: activeBinId,
+    // Own-PnL: keep the ORIGINAL SOL committed and add the old position's absolute PnL (SOL).
+    cost_basis_sol: lineage?.cost_basis_sol ?? tracked.cost_basis_sol ?? tracked.amount_sol ?? null,
+    carried_pnl_sol: (Number(lineage?.carried_pnl_sol) || 0) + (Number(live?.pnl_sol) || 0),
   }, { peak_pnl_pct: tracked.peak_pnl_pct ?? 0, trailing_active: !!tracked.trailing_active });
   // Exit watch / partial TP state follow the lineage.
   if (tracked.trigger_wallets?.length) setTriggerWallets(newAddress, tracked.trigger_wallets);

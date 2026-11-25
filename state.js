@@ -73,6 +73,7 @@ export function trackPosition({
   entry_tvl = null,
   entry_volume = null,
   entry_holders = null,
+  cost_basis_sol = null,
 }) {
   const state = load();
   state.positions[position] = {
@@ -83,6 +84,8 @@ export function trackPosition({
     bin_range,
     amount_sol,
     amount_x,
+    // Meridian-OP: SOL actually committed (single-sided SOL deploy = amount_sol). Basis for our own PnL %.
+    cost_basis_sol: cost_basis_sol ?? (Number(amount_x) > 0 ? null : (Number.isFinite(Number(amount_sol)) ? Number(amount_sol) : null)),
     active_bin_at_deploy: active_bin,
     bin_step,
     volatility,
@@ -227,6 +230,27 @@ export function recordInPlaceReshape(position_address, { activeBin, anchorTopBin
   return pos.lineage;
 }
 
+/**
+ * Meridian-OP: mark which PnL basis a position's peak/trailing state was built on. When the basis
+ * changes (e.g. switching to own SOL PnL), old peaks are meaningless — reset them to the current
+ * value so a stale / glitched peak can't fire a trailing exit.
+ */
+export function setPnlBasis(position_address, basis, currentPnlPct) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.pnl_basis === basis) return false;
+  pos.pnl_basis = basis;
+  pos.peak_pnl_pct = Number.isFinite(Number(currentPnlPct)) ? Math.max(0, Number(currentPnlPct)) : 0;
+  pos.trailing_active = false;
+  pos.pending_peak_pnl_pct = null;
+  pos.pending_peak_confirm_count = 0;
+  pos.pending_exit_action = null;
+  pos.pending_exit_count = 0;
+  save(state);
+  log("state", `Position ${position_address} PnL basis → ${basis}; peak reset to ${pos.peak_pnl_pct.toFixed(2)}%`);
+  return true;
+}
+
 export function setPositionLineage(position_address, lineage, carry = {}) {
   const state = load();
   const pos = state.positions[position_address];
@@ -241,6 +265,10 @@ export function setPositionLineage(position_address, lineage, carry = {}) {
     anchor_top_bin: lineage.anchor_top_bin ?? null,
     last_reshape_at: lineage.last_reshape_at ?? new Date().toISOString(),
     last_reshape_bin: lineage.last_reshape_bin ?? null,
+    // Own-PnL basis across a full-reshape lineage: original SOL committed + absolute PnL (SOL)
+    // already booked by the positions this one replaced.
+    cost_basis_sol: Number.isFinite(Number(lineage.cost_basis_sol)) ? Number(lineage.cost_basis_sol) : null,
+    carried_pnl_sol: Number.isFinite(Number(lineage.carried_pnl_sol)) ? Number(lineage.carried_pnl_sol) : 0,
   };
   pos.rebalance_count = pos.lineage.reshape_count;
   if (carry.peak_pnl_pct != null) pos.peak_pnl_pct = carry.peak_pnl_pct;

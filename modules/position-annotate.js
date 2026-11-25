@@ -8,7 +8,7 @@
 
 import { config } from "../config.js";
 import { log } from "../logger.js";
-import { getTrackedPosition } from "../state.js";
+import { getTrackedPosition, setPnlBasis } from "../state.js";
 import { recordTick, assessDump, fetchPoolCandles, pruneHistory } from "./dump-detector.js";
 import { getWalletExitState } from "./wallet-exit-watch.js";
 
@@ -21,6 +21,48 @@ export function chainPnlPct(rawPnlPct, pnlFactor) {
   const f = Number(pnlFactor);
   if (!Number.isFinite(f) || f <= 0 || f === 1) return rawPnlPct;
   return round2((f * (1 + Number(rawPnlPct) / 100) - 1) * 100);
+}
+
+/**
+ * Meridian-OP own PnL % in SOL. Pure.
+ *   pnl% = (carried absolute PnL of replaced positions + this position's absolute PnL in SOL)
+ *          / SOL originally committed × 100
+ * Meteora's absolute pnlSol already counts value, withdrawals (partial TP), claimed + unclaimed
+ * fees and deposits; withdraw + re-deposit (token-only reshape, compound) cancels out in the
+ * absolute number but inflates Meteora's % denominator — which is why we don't use their %.
+ * Returns null when the inputs are missing (caller falls back to the old method).
+ */
+export function ownPnlPct(p, tracked, getTracked = () => null) {
+  const pnlSol = Number(p?.pnl_sol);
+  if (p?.pnl_sol == null || !Number.isFinite(pnlSol) || !tracked) return null;
+  const lin = tracked.lineage;
+  const fullLineage = !!(lin?.root_position && lin.root_position !== p.position);
+  let cost, carried = 0;
+  if (fullLineage) {
+    cost = Number(lin.cost_basis_sol ?? getTracked(lin.root_position)?.cost_basis_sol ?? getTracked(lin.root_position)?.amount_sol);
+    carried = lin.carried_pnl_sol != null
+      ? Number(lin.carried_pnl_sol)
+      : (Number.isFinite(Number(lin.pnl_factor)) && cost > 0 ? (Number(lin.pnl_factor) - 1) * cost : 0); // legacy lineage estimate
+  } else {
+    cost = Number(tracked.cost_basis_sol ?? (Number(tracked.amount_x) > 0 ? NaN : tracked.amount_sol));
+  }
+  if (!(cost > 0) || !Number.isFinite(carried)) return null;
+  return round2(((carried + pnlSol) / cost) * 100);
+}
+
+/**
+ * Pure. Should PnL rules ignore this tick? Right after a deploy / reshape Meteora's numbers are
+ * often incomplete (e.g. −100% with zero value) — the cause of the "Stop loss −100%" closes at 0m.
+ */
+export function pnlUnreliable(p, tracked, { now = Date.now(), graceMinutes = 3 } = {}) {
+  const opened = Math.max(
+    new Date(tracked?.deployed_at || 0).getTime() || 0,
+    new Date(tracked?.lineage?.last_reshape_at || 0).getTime() || 0,
+  );
+  if (graceMinutes > 0 && opened && now - opened < graceMinutes * 60_000) return "grace period after deploy/reshape";
+  const value = Number(p?.total_value_sol ?? p?.total_value_true_usd ?? p?.total_value_usd);
+  if (Number(p?.pnl_pct) <= -90 && !(value > 1e-4)) return "PnL ≤ −90% with ~zero position value (data not ready)";
+  return null;
 }
 
 /** Sisi OOR dari bin. Pure. */
@@ -39,10 +81,29 @@ export async function annotatePositions(positions, { binStepFor = null, getCandl
     try {
       const tracked = getTrackedPosition(p.position);
       const lineage = tracked?.lineage;
-      if (lineage && p.pnl_pct_raw === undefined) {
-        p.pnl_pct_raw = p.pnl_pct;
-        p.pnl_pct = chainPnlPct(p.pnl_pct, lineage.pnl_factor);
-        p.reshape_count = lineage.reshape_count ?? 0;
+      if (p.pnl_pct_raw === undefined) {
+        p.pnl_pct_raw = p.pnl_pct; // Meteora's % (diluted by re-deposits; USD unless solMode)
+        const own = cfg.pnlBasis === "meteora" ? null : ownPnlPct(p, tracked, getTrackedPosition);
+        if (own != null) {
+          p.pnl_pct = own;
+          p.pnl_basis = "own_sol";
+          // First tick on the new basis: drop peaks recorded on the old one.
+          if (tracked.pnl_basis !== "own_sol") setPnlBasis(p.position, "own_sol", own);
+        } else if (lineage) {
+          p.pnl_pct = chainPnlPct(p.pnl_pct, lineage.pnl_factor); // legacy fallback
+          p.pnl_basis = "meteora_chained";
+        } else {
+          p.pnl_basis = "meteora";
+        }
+        if (lineage) p.reshape_count = lineage.reshape_count ?? 0;
+        // Unreliable tick → no PnL rule may act on it (SL/TP/trailing/peak all skip null).
+        const why = pnlUnreliable(p, tracked, { now, graceMinutes: Number(cfg.pnlGraceMinutes ?? 3) });
+        if (why) {
+          p.pnl_pct_unconfirmed = p.pnl_pct;
+          p.pnl_pct = null;
+          p.pnl_pct_suspicious = true;
+          p.pnl_unreliable_reason = why;
+        }
       }
       p.oor_side = oorSide(p);
       const walletExit = getWalletExitState(p.position);

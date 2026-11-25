@@ -433,6 +433,10 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
   `provider` presets (helius/alchemy) + `apiKey`, `{apiKey}` placeholders and `apiKeyParam`
   (`modules/rpc-endpoints-file.js`); HELIUS_API_KEY is derived from the first helius entry when unset. The standalone `WalletMonitor` websocket follows the failover via
   `onRpcSwitch` (re-subscribe + reconcile backfill) unless a dedicated MONITOR_RPC_URL is set.
+- **Own SOL PnL** (`pnlBasis: "own_sol"`, default): annotate sets `pnl_pct` = (lineage.carried_pnl_sol + Meteora absolute
+  `pnl_sol`) / cost_basis_sol. Meteora's % is diluted by withdraw+re-deposit (reshape/compound) — never use it for rules.
+  `pnl_pct_raw` keeps Meteora's %. Ticks inside `pnlGraceMinutes` after deploy/reshape, or ≤ −90% with ~zero value, get
+  `pnl_pct = null` + `pnl_pct_suspicious` so no PnL rule (SL/TP/trailing/peak/partial/reshape) acts. Basis switch resets peaks.
 - **Dump history persistence**: `enableHistoryPersistence(repoPath("dump-history.json"))` in both runtimes' start.
 - Tests: `npm run test:op` (pure, no network).
 

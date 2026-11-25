@@ -538,5 +538,33 @@ console.log("\n[15] reshape fee compounding (token fee → bid-ask, SOL fee → 
   check("wallet at/below reserve → SOL fee not added", !r.calls.some((c) => c.leg === "sol"));
 }
 
+console.log("\n[16] own SOL PnL (not diluted by reshape) + unreliable-tick guard");
+{
+  const { ownPnlPct, pnlUnreliable } = await import("../modules/position-annotate.js");
+  const old = new Date(Date.now() - 3600_000).toISOString();
+  // Deployed 0.5 SOL, now down 0.15 SOL absolute.
+  const tracked = { position: "P", amount_sol: 0.5, cost_basis_sol: 0.5, deployed_at: old };
+  check("-0.15 SOL on 0.5 committed → -30%", ownPnlPct({ position: "P", pnl_sol: -0.15 }, tracked) === -30);
+  // Token-only reshape re-deposited 0.3 SOL worth: Meteora % would read -0.15/0.8 = -18.75%; own stays -30%.
+  const inPlace = { ...tracked, lineage: { root_position: "P", reshape_count: 2, pnl_factor: 1 } };
+  check("in-place reshape: still -30% (Meteora % would show -18.75%)", ownPnlPct({ position: "P", pnl_sol: -0.15 }, inPlace) === -30);
+  // Legacy position without cost_basis_sol: falls back to amount_sol.
+  check("legacy tracked → amount_sol as cost", ownPnlPct({ position: "P", pnl_sol: 0.05 }, { amount_sol: 0.5, deployed_at: old }) === 10);
+  // Full-reshape lineage: root cost 0.5, old position booked -0.05, new position -0.02.
+  const child = { position: "C", amount_sol: 0.3, amount_x: 123, deployed_at: old, lineage: { root_position: "P", cost_basis_sol: 0.5, carried_pnl_sol: -0.05, pnl_factor: 0.9 } };
+  check("full-reshape lineage: (carried -0.05 + current -0.02) / 0.5 = -14%", ownPnlPct({ position: "C", pnl_sol: -0.02 }, child) === -14);
+  const legacyChild = { ...child, lineage: { root_position: "P", pnl_factor: 0.9 } };
+  check("legacy lineage (no carried) → estimate from factor + root cost", ownPnlPct({ position: "C", pnl_sol: 0 }, legacyChild, (a) => (a === "P" ? { amount_sol: 0.5 } : null)) === -10);
+  check("no pnl_sol → null (fallback to old method)", ownPnlPct({ position: "P" }, tracked) === null);
+  check("token-deposit position without cost → null", ownPnlPct({ position: "X", pnl_sol: 1 }, { amount_x: 5, amount_sol: 1, deployed_at: old }) === null);
+
+  const fresh = { deployed_at: new Date().toISOString() };
+  check("grace: first minutes after deploy → unreliable", !!pnlUnreliable({ pnl_pct: -2, total_value_sol: 0.5 }, fresh));
+  check("grace: after a reshape too", !!pnlUnreliable({ pnl_pct: -2, total_value_sol: 0.5 }, { deployed_at: old, lineage: { last_reshape_at: new Date().toISOString() } }));
+  check("-100% with zero value (data not ready) → unreliable", !!pnlUnreliable({ pnl_pct: -100, total_value_sol: 0 }, { deployed_at: old }));
+  check("real -40% with value → reliable", pnlUnreliable({ pnl_pct: -40, total_value_sol: 0.3 }, { deployed_at: old }) === null);
+  check("normal tick → reliable", pnlUnreliable({ pnl_pct: 3, total_value_sol: 0.5 }, { deployed_at: old }) === null);
+}
+
 console.log(failed === 0 ? "\nALL TESTS PASSED" : `\n${failed} TEST(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);
