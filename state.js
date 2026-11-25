@@ -208,7 +208,7 @@ export function recordClose(position_address, reason) {
  * Meridian-OP in-place (token-only) reshape: same position, so PnL is NOT chained (pnl_factor
  * stays as it was, default 1). Only the reshape bookkeeping moves: count, time, anchor bin.
  */
-export function recordInPlaceReshape(position_address, { activeBin, anchorTopBin = null } = {}) {
+export function recordInPlaceReshape(position_address, { activeBin, anchorTopBin = null, feesUsdTotal = null } = {}) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos) return null;
@@ -223,6 +223,8 @@ export function recordInPlaceReshape(position_address, { activeBin, anchorTopBin
     anchor_top_bin: prev.anchor_top_bin ?? anchorTopBin ?? pos.bin_range?.max ?? null,
     last_reshape_at: new Date().toISOString(),
     last_reshape_bin: activeBin ?? null,
+    // Position fees (claimed + unclaimed, USD) at this reshape: the next reshape must earn its cost anew.
+    fees_usd_at_reshape: Number.isFinite(Number(feesUsdTotal)) && feesUsdTotal != null ? Number(feesUsdTotal) : (prev.fees_usd_at_reshape ?? null),
   };
   pos.rebalance_count = pos.lineage.reshape_count;
   pushEvent(state, { action: "reshape", position: position_address, pool_name: pos.pool_name || pos.pool, reason: `in-place token reshape #${pos.lineage.reshape_count}` });

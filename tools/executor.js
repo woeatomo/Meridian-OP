@@ -456,6 +456,7 @@ const toolMap = {
       reshapeReboundToleranceBins: ["management", "reshapeReboundToleranceBins"],
       reshapeMinPnlPct: ["management", "reshapeMinPnlPct"],
       reshapeCostUsd: ["management", "reshapeCostUsd"],
+      reshapeMinHistoryMin: ["management", "reshapeMinHistoryMin"],
       reshapeFeeCostMultiple: ["management", "reshapeFeeCostMultiple"],
       reshapeMaxBinsAbove: ["management", "reshapeMaxBinsAbove"],
       maxSwapPriceImpactPct: ["management", "maxSwapPriceImpactPct"],

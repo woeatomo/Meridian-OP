@@ -36,7 +36,7 @@ import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
 import { annotatePositions } from "../modules/position-annotate.js";
 import { rpcConnection } from "../modules/rpc-health.js";
-import { planReshapeRange, nextPnlFactor } from "../modules/reshape-manager.js";
+import { planReshapeRange, nextPnlFactor, reshapeCostUsd } from "../modules/reshape-manager.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -2343,7 +2343,8 @@ async function reshapeTokenOnly({ position_address, tracked, reason, tokenStrate
   const cfg = config.management;
   const live = _positionsCache?.positions?.find((p) => p.position === position_address);
   const unclaimedUsd = Number(live?.unclaimed_fees_true_usd ?? 0) || 0;
-  const minFeeUsd = Number(cfg.reshapeCompoundMinUsd ?? 2 * Number(cfg.reshapeCostUsd ?? 0.25));
+  const feesUsdTotal = live ? (Number(live.collected_fees_true_usd ?? 0) || 0) + unclaimedUsd : null;
+  const minFeeUsd = Number(cfg.reshapeCompoundMinUsd ?? 2 * reshapeCostUsd(cfg));
   const compound = cfg.reshapeCompoundFees !== false && unclaimedUsd >= minFeeUsd;
   const solStrategyType = RESHAPE_STRATEGIES()[cfg.reshapeSolStrategy || "spot"] ?? RESHAPE_STRATEGIES().spot;
   if (cfg.reshapeCompoundFees !== false && !compound) log("reshape", `Fees $${unclaimedUsd.toFixed(2)} < $${minFeeUsd.toFixed(2)} — reshaping without compounding`);
@@ -2370,7 +2371,7 @@ async function reshapeTokenOnly({ position_address, tracked, reason, tokenStrate
   const { withdrawTxs, depositTxs, claimTxs = [], solTxs = [], solAdded, deltaX, from, liveActive } = core;
   {
     if (claimTxs.length) recordClaim(position_address, unclaimedUsd);
-    const lineage = recordInPlaceReshape(position_address, { activeBin: liveActive, anchorTopBin: tracked.lineage?.anchor_top_bin ?? tracked.bin_range?.max ?? pd.upperBinId });
+    const lineage = recordInPlaceReshape(position_address, { activeBin: liveActive, anchorTopBin: tracked.lineage?.anchor_top_bin ?? tracked.bin_range?.max ?? pd.upperBinId, feesUsdTotal });
     const solAddedSol = solAdded ? Number(solAdded.toString()) / 1e9 : 0;
     const compoundNote = claimTxs.length
       ? `fees ~$${unclaimedUsd.toFixed(2)} compounded (token → bid-ask${solAddedSol > 0 ? `, ${solAddedSol.toFixed(4)} SOL → spot below` : ", SOL fee kept in wallet"})`

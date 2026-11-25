@@ -742,7 +742,37 @@ switch (subcommand) {
 
   // ── reshape (Meridian-OP) ──────────────────────────────────────
   case "reshape": {
-    if (!flags.position) die("Usage: meridian reshape --position <addr> [--strategy bid_ask|spot|curve] [--force]");
+    if (argv.includes("--check")) {
+      // Read-only preview: what the poller would decide for every open position right now.
+      const { repoPath } = await import("./repo-root.js");
+      const { loadHistorySnapshot } = await import("./modules/dump-detector.js");
+      const { getMyPositions } = await import("./tools/dlmm.js");
+      const { getTrackedPosition } = await import("./state.js");
+      const { decideReshape, reshapeInputFromPosition, reshapeCostUsd } = await import("./modules/reshape-manager.js");
+      const { config } = await import("./config.js");
+      loadHistorySnapshot(repoPath("dump-history.json")); // daemon's tick history; never written from here
+      const live = await getMyPositions({ force: true, silent: true });
+      if (live.error) die(`Position read failed: ${live.error}`);
+      const cfg = config.management;
+      const rows = (live.positions || []).map((p) => {
+        const tracked = getTrackedPosition(p.position);
+        const inp = reshapeInputFromPosition(p, tracked, cfg, {});
+        const d = decideReshape({ ...inp, enabled: true }, cfg); // evaluate as if enabled
+        return {
+          pair: p.pair, position: p.position, decision: d.action, reason: d.reason,
+          bins_down: d.binsDown, bins_down_10m: inp.binsDown10m, history_min: inp.historyMin,
+          pnl_pct: inp.pnlPct, fees_since_reshape_usd: Math.round(inp.feesSinceReshapeUsd * 100) / 100,
+          reshapes_done: inp.reshapesDone,
+        };
+      });
+      out({
+        reshape_enabled: cfg.reshapeEnabled === true, mode: cfg.reshapeMode ?? "token_only",
+        cost_usd: reshapeCostUsd(cfg), note: "Exit signals are not evaluated here; the poller skips reshape while one is pending.",
+        positions: rows,
+      });
+      break;
+    }
+    if (!flags.position) die("Usage: meridian reshape --position <addr> [--strategy bid_ask|spot|curve] [--force] | meridian reshape --check");
     const { executeTool } = await import("./tools/executor.js");
     out(await executeTool("reshape_position", {
       position_address: flags.position,

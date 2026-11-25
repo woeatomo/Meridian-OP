@@ -197,7 +197,8 @@ export const config = {
     reshapeConfirmMinutes:  u.reshapeConfirmMinutes  ?? 2,   // kondisi reshape harus bertahan N menit (hysteresis)
     reshapeReboundToleranceBins: u.reshapeReboundToleranceBins ?? 2, // > low 10 mnt + X bin = rebound, jangan reshape
     reshapeMinPnlPct:       u.reshapeMinPnlPct       ?? -12, // di bawah ini biarkan SL yang memutuskan
-    reshapeCostUsd:         u.reshapeCostUsd         ?? 0.25,// estimasi biaya tx reshape (rent posisi kembali)
+    reshapeCostUsd:         u.reshapeCostUsd         ?? null,// biaya 1 reshape USD (null = otomatis: token_only 0.08, full 0.25)
+    reshapeMinHistoryMin:   u.reshapeMinHistoryMin   ?? 8,   // riwayat tick kontinu (jendela 10 mnt) minimal sebelum reshape
     reshapeFeeCostMultiple: u.reshapeFeeCostMultiple ?? 2,   // fee posisi harus >= X * biaya reshape
     reshapeMaxBinsAbove:    u.reshapeMaxBinsAbove    ?? 69,  // batas bin sisi token di atas harga
     // Meridian-OP: Swap guard (modules/swap-guard.js)

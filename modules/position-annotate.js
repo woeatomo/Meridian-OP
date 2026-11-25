@@ -118,6 +118,7 @@ export async function annotatePositions(positions, { binStepFor = null, getCandl
       p.bins_down_10m = d.stats.bins_down_10m;
       p.price_change_15m_pct = d.stats.price_change_15m_pct;
       p.low_bin_10m = d.stats.low_bin_10m;
+      p.move_history_min = Math.round((d.stats.window_coverage_min ?? 0) * 10) / 10;
       if (lastDumpState.get(p.position) !== d.dump_confirmed) {
         if (d.dump_confirmed || lastDumpState.has(p.position)) {
           log(d.dump_confirmed ? "dump_warn" : "dump", `${p.pair ?? p.position.slice(0, 8)}: dump ${d.dump_confirmed ? "CONFIRMED" : "cleared"} — price15m=${d.stats.price_change_15m_pct ?? "?"}% bins10m=-${d.stats.bins_down_10m} candles=${d.signals.candles} (${d.count}/3)`);

@@ -7,7 +7,7 @@
 import { config } from "../config.js";
 import { getDeterministicCloseRule } from "../exit-rules.js";
 import { recordTick, movementStats, assessDump, redCandleSignal, normalizeCandles, binMovePct, forgetPosition } from "../modules/dump-detector.js";
-import { decideReshape, planReshapeRange, nextPnlFactor, confirmReshape, reshapeInputFromPosition } from "../modules/reshape-manager.js";
+import { decideReshape, planReshapeRange, nextPnlFactor, confirmReshape, reshapeInputFromPosition, reshapeCostUsd } from "../modules/reshape-manager.js";
 import { chainPnlPct, oorSide } from "../modules/position-annotate.js";
 import { parseOrderPriceImpactPct } from "../tools/wallet.js";
 import { swapGuard } from "../modules/swap-guard.js";
@@ -34,6 +34,15 @@ console.log("\n[1] dump detector — movement from tick history");
   check("price change from bin step", s.price_change_15m_pct < -10 && s.price_change_15m_pct > -12, String(s.price_change_15m_pct));
   const d = await assessDump(P, { binStep: 100, cfg, now });
   check("fast dump confirmed (price + bins)", d.dump_confirmed && d.signals.price && d.signals.bins, JSON.stringify(d.signals));
+  check("window coverage = continuous history inside the 10m window", Math.abs(s.window_coverage_min - 6) < 1e-9);
+  // Restart gap: an old sample 30m ago, then fresh ticks only for the last minute.
+  const G = "PosGap";
+  recordTick(G, { active_bin: 500 }, T0);
+  recordTick(G, { active_bin: 500 }, T0 + 30 * MIN);
+  recordTick(G, { active_bin: 499 }, T0 + 31 * MIN);
+  const g = movementStats(G, { binStep: 100, cfg, now: T0 + 31 * MIN });
+  check("restart gap → small window coverage despite long total history", g.coverage_min >= 30 && g.window_coverage_min <= 1.01, JSON.stringify(g));
+  forgetPosition(G);
   forgetPosition(P);
 }
 {
@@ -86,7 +95,7 @@ console.log("\n[3] reshape decisions");
   const base = {
     enabled: true, inRange: true, oorSide: null, activeBin: 94, anchorBin: 100, lowBin10m: 94, binsDown10m: 3,
     dumpConfirmed: false, pnlPct: -4, pnlSuspicious: false, reshapesDone: 0, minutesSinceLastReshape: null,
-    feesEarnedUsd: 5, hasExitSignal: false,
+    feesSinceReshapeUsd: 5, historyMin: 10, hasExitSignal: false,
   };
   check("slow 6-bin drop, economical → RESHAPE", decideReshape(base, rcfg).action === "RESHAPE", decideReshape(base, rcfg).reason);
   check("disabled → HOLD", decideReshape({ ...base, enabled: false }, rcfg).action === "HOLD");
@@ -99,7 +108,11 @@ console.log("\n[3] reshape decisions");
   check("OOR left → HOLD", decideReshape({ ...base, inRange: false, oorSide: "left" }, rcfg).action === "HOLD");
   check("cooldown → HOLD", /cooldown/.test(decideReshape({ ...base, minutesSinceLastReshape: 10 }, rcfg).reason));
   check("max reshapes → HOLD", /max reshapes/.test(decideReshape({ ...base, reshapesDone: 3 }, rcfg).reason));
-  check("fees < 2x cost → HOLD", /economical/.test(decideReshape({ ...base, feesEarnedUsd: 0.1 }, rcfg).reason));
+  check("fees < 2x cost → HOLD", /economical/.test(decideReshape({ ...base, feesSinceReshapeUsd: 0.1 }, rcfg).reason));
+  check("no tick history (restart / fresh) → HOLD, fail closed", /warming up/.test(decideReshape({ ...base, historyMin: null }, rcfg).reason));
+  check("short tick history (< reshapeMinHistoryMin) → HOLD", /warming up/.test(decideReshape({ ...base, historyMin: 3 }, rcfg).reason));
+  check("reshapeMinHistoryMin 0 disables the warm-up gate", decideReshape({ ...base, historyMin: null }, { ...rcfg, reshapeMinHistoryMin: 0 }).action === "RESHAPE");
+  check("auto cost: token_only cheaper than full", reshapeCostUsd({ reshapeMode: "token_only" }) < reshapeCostUsd({ reshapeMode: "full" }) && reshapeCostUsd({ reshapeCostUsd: 0.3 }) === 0.3);
   check("exit pending → HOLD", decideReshape({ ...base, hasExitSignal: true }, rcfg).action === "HOLD");
 
   // Hysteresis: must hold for reshapeConfirmMinutes.
@@ -115,6 +128,11 @@ console.log("\n[3] reshape decisions");
   const tracked = { active_bin_at_deploy: 100, bin_range: { max: 100 }, lineage: { last_reshape_bin: 94, reshape_count: 1, last_reshape_at: new Date(T0).toISOString() } };
   const inp = reshapeInputFromPosition({ in_range: true, active_bin: 90, pnl_pct: -3, collected_fees_true_usd: 2 }, tracked, rcfg, { now: T0 + 60 * MIN });
   check("anchor = last reshape bin; cooldown minutes from lineage", inp.anchorBin === 94 && inp.reshapesDone === 1 && Math.round(inp.minutesSinceLastReshape) === 60);
+  // Economics: fees = claimed + unclaimed, counted only since the last reshape.
+  const tr2 = { ...tracked, lineage: { ...tracked.lineage, fees_usd_at_reshape: 2.5 } };
+  const inp2 = reshapeInputFromPosition({ in_range: true, active_bin: 90, collected_fees_true_usd: 2, unclaimed_fees_true_usd: 1, move_history_min: 9.5 }, tr2, rcfg, { now: T0 + 60 * MIN });
+  check("fees since last reshape = (claimed + unclaimed) - fees at reshape", Math.abs(inp2.feesSinceReshapeUsd - 0.5) < 1e-9 && inp2.feesTotalUsd === 3 && inp2.historyMin === 9.5);
+  check("first reshape counts all fees (no lineage baseline)", reshapeInputFromPosition({ collected_fees_true_usd: 2, unclaimed_fees_true_usd: 1 }, { active_bin_at_deploy: 100 }, rcfg).feesSinceReshapeUsd === 3);
 }
 
 console.log("\n[4] reshape range plan + PnL lineage");

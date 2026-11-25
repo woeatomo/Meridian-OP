@@ -30,6 +30,11 @@ let dirty = false;
 
 export function enableHistoryPersistence(file, now = Date.now()) {
   persistFile = file;
+  return loadHistorySnapshot(file, now);
+}
+
+/** Load saved history WITHOUT enabling writes (one-shot CLI next to a running daemon). */
+export function loadHistorySnapshot(file, now = Date.now()) {
   try {
     if (!fs.existsSync(file)) return 0;
     const raw = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -112,7 +117,7 @@ export function binMovePct(fromBin, toBin, binStep) {
  */
 export function movementStats(position, { binStep = null, cfg = {}, now = Date.now() } = {}) {
   const list = history.get(position) ?? [];
-  if (!list.length) return { samples: 0, coverage_min: 0, bins_down_10m: 0, price_change_15m_pct: null, low_bin_10m: null, current_bin: null };
+  if (!list.length) return { samples: 0, coverage_min: 0, window_coverage_min: 0, bins_down_10m: 0, price_change_15m_pct: null, low_bin_10m: null, current_bin: null };
   const cur = list[list.length - 1];
   const binWin = windowSamples(list, (cfg.dumpBinWindowMin ?? 10) * 60_000, now);
   const priceWin = windowSamples(list, (cfg.dumpPriceWindowMin ?? 15) * 60_000, now);
@@ -132,6 +137,8 @@ export function movementStats(position, { binStep = null, cfg = {}, now = Date.n
   return {
     samples: list.length,
     coverage_min: (now - list[0].ts) / 60_000,
+    // Continuous history inside the bin window (a restart gap leaves only the post-restart samples).
+    window_coverage_min: binWin.length ? (now - binWin[0].ts) / 60_000 : 0,
     bins_down_10m: binsDown,
     price_change_15m_pct: priceChange == null ? null : Math.round(priceChange * 100) / 100,
     low_bin_10m: binWin.length ? Math.min(...binWin.map(s => s.bin)) : cur.bin,

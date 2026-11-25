@@ -50,8 +50,16 @@ Syarat RESHAPE (semua harus terpenuhi):
 - **bukan rebound**: active bin ≤ low 10 menit + `reshapeReboundToleranceBins`;
 - PnL > `reshapeMinPnlPct` (−12%) — terlalu dekat SL, biarkan SL;
 - cooldown `reshapeCooldownMinutes` (45) lewat, belum `reshapeMaxPerPosition` (3) kali;
-- fee posisi ≥ `reshapeFeeCostMultiple` × `reshapeCostUsd`;
+- **riwayat tick cukup**: ≥ `reshapeMinHistoryMin` (8) menit riwayat kontinu di jendela 10 mnt. Posisi baru
+  atau setelah restart (ada celah) → HOLD "warming up", karena guard dump/rebound masih buta (fail closed);
+- **fee sejak reshape terakhir** (klaim + belum diklaim, dikurangi fee saat reshape sebelumnya) ≥
+  `reshapeFeeCostMultiple` × biaya reshape. Biaya = `reshapeCostUsd`, atau bila tidak diisi otomatis
+  0.08 USD (`token_only`, beberapa tx tanpa rent) / 0.25 USD (`full`);
 - kondisi di atas bertahan `reshapeConfirmMinutes` (2) berturut-turut (hysteresis).
+
+**Cek sebelum diaktifkan**: `node cli.js reshape --check` — read-only, menampilkan keputusan
+(RESHAPE/HOLD + alasan, bins_down, history_min, fee sejak reshape) untuk tiap posisi terbuka, dievaluasi
+seolah `reshapeEnabled` aktif. Riwayat tick dibaca dari `dump-history.json` milik daemon (tidak ditulis).
 
 **Mode default `reshapeMode: "token_only"`** (in-place, satu sisi): di posisi yang SAMA, hanya bin di
 atas harga (yang sudah jadi token) ditarik lalu dipasang ulang sebagai `reshapeTokenStrategy`

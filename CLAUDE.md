@@ -407,7 +407,9 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
 - **OOR**: `state.js#updatePnlAndCheckExits` only closes OOR-left (or unknown side); OOR-right goes to exit-rules 3/4.
 - **Reshape**: `reshape_position` tool (WRITE/PROTECTED, lock priority 6) → `tools/dlmm.js#reshapePosition`.
   Triggered only by `modules/reshape-runner.js#maybeReshape` from the fast pollers when no exit signal is pending.
-  Lineage lives in `state.json positions[addr].lineage` (`pnl_factor`, `reshape_count`, `anchor_top_bin`, …).
+  Lineage lives in `state.json positions[addr].lineage` (`pnl_factor`, `reshape_count`, `anchor_top_bin`,
+  `fees_usd_at_reshape`, …). Decision gates fail closed without `reshapeMinHistoryMin` of continuous tick history
+  (`move_history_min` from annotate) and count only fees earned since the last reshape. Preview: `cli.js reshape --check`.
 - **Swap guard**: `swapToken({ max_price_impact_pct })` refuses before signing; `swapBaseToSolWithRetry` splits
   and queues leftovers in `state.json pendingSwaps`, swept by both management cycles (`sweepPendingSwaps`).
 - **Portfolio guard** (`modules/portfolio-runner.js`): equity = wallet + open positions (SOL by default), state in

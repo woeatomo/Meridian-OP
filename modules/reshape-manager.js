@@ -19,7 +19,7 @@
  * p: {
  *   enabled, inRange, oorSide, activeBin, anchorBin, lowBin10m, binsDown10m,
  *   dumpConfirmed, pnlPct, pnlSuspicious, reshapesDone, minutesSinceLastReshape,
- *   feesEarnedUsd, hasExitSignal
+ *   feesSinceReshapeUsd, historyMin, hasExitSignal
  * }
  * cfg: config.management
  * Return { action: "RESHAPE" | "HOLD", reason, binsDown }
@@ -31,8 +31,9 @@ export function decideReshape(p, cfg = {}) {
   const fastDrop = Number(cfg.dumpBinDrop ?? 8);
   const reboundTol = Number(cfg.reshapeReboundToleranceBins ?? 2);
   const minPnl = Number(cfg.reshapeMinPnlPct ?? -12);
-  const costUsd = Number(cfg.reshapeCostUsd ?? 0.25);
+  const costUsd = reshapeCostUsd(cfg);
   const costMult = Number(cfg.reshapeFeeCostMultiple ?? 2);
+  const minHistory = Number(cfg.reshapeMinHistoryMin ?? 8);
   const hold = reason => ({ action: "HOLD", reason, binsDown });
 
   const binsDown = (p.anchorBin != null && p.activeBin != null) ? p.anchorBin - p.activeBin : null;
@@ -48,15 +49,31 @@ export function decideReshape(p, cfg = {}) {
     return hold(`reshape cooldown (${cooldownMin}m) not elapsed`);
   }
   if (binsDown < step) return hold(`down ${binsDown} < ${step} bins — no reshape yet`);
+  // Fast-drop / rebound guards read the 10m tick history. Without enough of it (fresh
+  // position, restart gap) they are blind — fail closed instead of reshaping into a dump.
+  if (minHistory > 0 && !(Number(p.historyMin) >= minHistory)) {
+    return hold(`movement history ${Number(p.historyMin) || 0}m < ${minHistory}m — warming up, dump/rebound guards not reliable yet`);
+  }
   if ((p.binsDown10m ?? 0) >= fastDrop) return hold(`fast drop (${p.binsDown10m} bins / 10m) — treat as dump, no reshape`);
   if (p.lowBin10m != null && p.activeBin > p.lowBin10m + reboundTol) {
     return hold(`rebounding (${p.activeBin - p.lowBin10m} bins above 10m low) — no reshape on bounce`);
   }
   if (p.pnlPct != null && p.pnlPct <= minPnl) return hold(`PnL ${p.pnlPct}% <= ${minPnl}% — too close to stop loss, let SL decide`);
-  if (costUsd > 0 && (p.feesEarnedUsd ?? 0) < costMult * costUsd) {
-    return hold(`fees $${(p.feesEarnedUsd ?? 0).toFixed(2)} < ${costMult}x reshape cost $${costUsd} — not economical`);
+  const fees = Number(p.feesSinceReshapeUsd ?? p.feesEarnedUsd ?? 0) || 0;
+  if (costUsd > 0 && fees < costMult * costUsd) {
+    return hold(`fees since last reshape $${fees.toFixed(2)} < ${costMult}x reshape cost $${costUsd} — not economical`);
   }
   return { action: "RESHAPE", reason: `down ${binsDown} bins slowly (${p.binsDown10m ?? 0}/10m), economical — reshape to bid-ask, re-centre down`, binsDown };
+}
+
+/**
+ * Estimated cost of one reshape in USD. An explicit `reshapeCostUsd` wins; otherwise it depends
+ * on the mode: token_only is a few txs in the same position (no rent), full opens a new position
+ * (position rent is mostly refunded, but more txs + bin-array risk).
+ */
+export function reshapeCostUsd(cfg = {}) {
+  if (cfg.reshapeCostUsd != null && Number.isFinite(Number(cfg.reshapeCostUsd))) return Number(cfg.reshapeCostUsd);
+  return (cfg.reshapeMode ?? "token_only") === "full" ? 0.25 : 0.08;
 }
 
 // Hysteresis: kondisi RESHAPE harus bertahan `reshapeConfirmMinutes` berturut-turut.
@@ -104,7 +121,10 @@ export function reshapeInputFromPosition(p, tracked, cfg = {}, { hasExitSignal =
   const lineage = tracked?.lineage ?? null;
   const anchorBin = lineage?.last_reshape_bin ?? tracked?.active_bin_at_deploy ?? tracked?.bin_range?.max ?? null;
   const lastAt = lineage?.last_reshape_at ? new Date(lineage.last_reshape_at).getTime() : null;
-  const fees = Math.max(Number(p.collected_fees_true_usd ?? 0) || 0, Number(p.unclaimed_fees_true_usd ?? 0) || 0);
+  // Lifetime fees of this position = claimed + unclaimed. The economics gate only counts what was
+  // earned since the last reshape, otherwise every reshape after the first passes for free.
+  const feesTotal = (Number(p.collected_fees_true_usd ?? 0) || 0) + (Number(p.unclaimed_fees_true_usd ?? 0) || 0);
+  const feesAtReshape = Number(lineage?.fees_usd_at_reshape ?? 0) || 0;
   return {
     enabled: cfg.reshapeEnabled === true,
     inRange: p.in_range,
@@ -118,7 +138,9 @@ export function reshapeInputFromPosition(p, tracked, cfg = {}, { hasExitSignal =
     pnlSuspicious: !!p.pnl_pct_suspicious,
     reshapesDone: lineage?.reshape_count ?? 0,
     minutesSinceLastReshape: lastAt ? (now - lastAt) / 60_000 : null,
-    feesEarnedUsd: fees,
+    feesTotalUsd: feesTotal,
+    feesSinceReshapeUsd: Math.max(0, feesTotal - feesAtReshape),
+    historyMin: p.move_history_min ?? null,
     hasExitSignal,
   };
 }
